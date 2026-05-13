@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      - uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev
+
+      - name: Build
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          mkdir -p dist
+
+          cargo build --release
+
+          OUTDIR="dist/revisa_${VERSION}_linux_amd64"
+          mkdir -p "$OUTDIR"
+          cp target/release/revisa "$OUTDIR/"
+          cp git-revisa "$OUTDIR/"
+          tar czf "${OUTDIR}.tar.gz" -C dist "revisa_${VERSION}_linux_amd64"
+
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+
+      - name: Sign checksums
+        run: |
+          cosign sign-blob \
+            --bundle dist/checksums.txt.bundle \
+            dist/checksums.txt \
+            --yes
+
+      - uses: actions/attest@v4
+        with:
+          subject-checksums: dist/checksums.txt
+
+      - name: Upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            dist/*.tar.gz \
+            dist/checksums.txt \
+            dist/checksums.txt.bundle \
+            --clobber

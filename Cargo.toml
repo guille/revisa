@@ -1,0 +1,72 @@
+[package]
+name    = "revisa"
+version = "1.0.0"
+edition = "2024"
+
+[[bin]]
+name = "revisa"
+path = "src/main.rs"
+
+[dependencies]
+clap       = { version = "4", default-features = false, features = [
+  "derive",
+  "error-context",
+  "help",
+  "std",
+  "usage"
+] }
+eframe     = { version = "0.34", default-features = false, features = [
+  "wayland",
+  "wgpu",
+  "x11",
+] }
+fontconfig = { version = "0.10", default-features = false, features = ["dlopen"] }
+rayon      = "1"
+serde      = { version = "1", features = ["derive"] }
+similar    = "3"
+syntect    = { git = "https://github.com/trishume/syntect.git", rev = "4aa78031e93ebd3e0be7278120d0bd9d2508b1a3", default-features = false, features = [
+  "dump-create",
+  "dump-load",
+  "parsing",
+  "plist-load",
+  "regex-fancy",
+  "yaml-load",
+] }
+toml       = { version = "1", default-features = false, features = [
+  "parse",
+  "serde"
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+dev-tools = []
+
+[lints.clippy]
+all      = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+cast_lossless            = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss      = "allow"
+cast_sign_loss           = "allow"
+doc_markdown             = "allow"
+missing_errors_doc       = "allow"
+missing_panics_doc       = "allow"
+module_name_repetitions  = "allow"
+must_use_candidate       = "allow"
+too_many_lines           = "allow"
+
+clone_on_ref_ptr = "warn"
+implicit_clone   = "warn"
+# Extra lints
+unwrap_used      = "warn"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[profile.release]
+strip         = true
+lto           = true
+codegen-units = 1
