@@ -1,0 +1,40 @@
+[env]
+CARGO_NET_GIT_FETCH_WITH_CLI = "true"
+
+[tools]
+rust = "latest"
+
+[tasks.build]
+description = "Build the project"
+run         = "cargo build"
+
+[tasks.build-release]
+description = "Build the project (release mode)"
+run         = "cargo build --release"
+
+[tasks.run]
+description = "Run the project"
+run         = "cargo run"
+
+[tasks.run-release]
+description = "Run the project (release mode)"
+run         = "cargo run --release"
+
+[tasks.test]
+description = "Run tests"
+run         = "cargo test"
+
+[tasks.fmt]
+description = "Format code"
+run         = "cargo fmt"
+
+[tasks.lint]
+description = "Run clippy"
+run         = "cargo clippy --all-targets --all-features -- -D warnings"
+
+[tasks.build-assets]
+run     = "cargo run --features dev-tools -- build-cache --bundled"
+sources = [
+  "assets/bundled_syntaxes/*.sublime-syntax",
+]
+outputs = ["assets/bundled_syntaxes.bin"]
