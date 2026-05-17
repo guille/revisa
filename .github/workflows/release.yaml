@@ -28,6 +28,15 @@ jobs:
 
       - uses: sigstore/cosign-installer@v4.1.2
 
+      - name: Verify version matches tag
+        run: |
+          CARGO_VERSION=$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[0].version')
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Cargo.toml version ($CARGO_VERSION) does not match tag ($TAG_VERSION)"
+            exit 1
+          fi
+
       - name: Build
         run: |
           VERSION=${GITHUB_REF_NAME}
