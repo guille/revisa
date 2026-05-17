@@ -2,7 +2,9 @@
 
 Revisa is a Linux GUI (X11/Wayland) tool for viewing diffs between two directories.
 
-![revisa screenshot](docs/screenshot.png)
+![revisa screenshot](docs/side-by-side.webp)
+
+*More screenshots available in [the website](https://revisa.guillerg.dev/)*
 
 ## Installation
 
