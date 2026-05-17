@@ -53,7 +53,6 @@ ensure_difftool_configured() {
         echo "Configuring revisa as a git difftool..." >&2
         local escaped_bin="${revisa_bin//\'/\'\\\'\'}"
         git config --global "difftool.${TOOL}.cmd" "'${escaped_bin}' diff --left \"\$LOCAL\" --right \"\$REMOTE\""
-        git config --global "difftool.${TOOL}.trustExitCode" true
         echo "Done. Global git config updated." >&2
     fi
 }
