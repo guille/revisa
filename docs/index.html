@@ -35,89 +35,96 @@
     </div>
   </header>
 
-  <section class="showcase">
-    <div class="container">
-      <div class="showcase-tabs" role="tablist">
-        <button class="showcase-tab active" role="tab" aria-selected="true" data-tab="side-by-side">Side-by-side</button>
-        <button class="showcase-tab" role="tab" aria-selected="false" data-tab="unified">Unified view</button>
-        <button class="showcase-tab" role="tab" aria-selected="false" data-tab="picker">Quick picker</button>
-        <button class="showcase-tab" role="tab" aria-selected="false" data-tab="search">Search</button>
+  <main>
+    <section class="showcase">
+      <div class="container">
+        <div class="showcase-tabs" role="tablist">
+          <button class="showcase-tab active" role="tab" aria-selected="true"
+            data-tab="side-by-side">Side-by-side</button>
+          <button class="showcase-tab" role="tab" aria-selected="false" data-tab="unified">Unified view</button>
+          <button class="showcase-tab" role="tab" aria-selected="false" data-tab="picker">Quick picker</button>
+          <button class="showcase-tab" role="tab" aria-selected="false" data-tab="search">Search</button>
+        </div>
+        <div class="showcase-panels">
+          <div class="showcase-panel active" data-panel="side-by-side">
+            <img src="side-by-side.webp" alt="Side-by-side diff view with word-level inline highlights" width="1920"
+              height="1050" loading="eager" decoding="async" fetchpriority="high">
+            <p class="showcase-caption">Scroll-synced side-by-side view with word-level inline diff highlighting.</p>
+          </div>
+          <div class="showcase-panel" data-panel="unified">
+            <img src="unified.webp" alt="Unified stacked diff view with dual gutter" width="1920" height="1047"
+              loading="lazy" decoding="async">
+            <p class="showcase-caption">Unified (stacked) view with dual gutter showing old and new line numbers.</p>
+          </div>
+          <div class="showcase-panel" data-panel="picker">
+            <img src="picker.webp" alt="Quick picker with fuzzy file search" width="1920" height="1050" loading="lazy"
+              decoding="async">
+            <p class="showcase-caption">Ctrl+P fuzzy search to jump to any file instantly.</p>
+          </div>
+          <div class="showcase-panel" data-panel="search">
+            <img src="search.webp" alt="Search across all files in the diff" width="1920" height="1048" loading="lazy"
+              decoding="async">
+            <p class="showcase-caption">Search across all files with results grouped in the sidebar.</p>
+          </div>
+        </div>
       </div>
-      <div class="showcase-panels">
-        <div class="showcase-panel active" data-panel="side-by-side">
-          <img src="side-by-side.webp" alt="Side-by-side diff view with word-level inline highlights" width="1920" height="1080" loading="eager" decoding="async" fetchpriority="high">
-          <p class="showcase-caption">Scroll-synced side-by-side view with word-level inline diff highlighting.</p>
-        </div>
-        <div class="showcase-panel" data-panel="unified">
-          <img src="unified.webp" alt="Unified stacked diff view with dual gutter" width="1920" height="1080" loading="lazy" decoding="async">
-          <p class="showcase-caption">Unified (stacked) view with dual gutter showing old and new line numbers.</p>
-        </div>
-        <div class="showcase-panel" data-panel="picker">
-          <img src="picker.webp" alt="Quick picker with fuzzy file search" width="1920" height="1080" loading="lazy" decoding="async">
-          <p class="showcase-caption">Ctrl+P fuzzy search to jump to any file instantly.</p>
-        </div>
-        <div class="showcase-panel" data-panel="search">
-          <img src="search.webp" alt="Search across all files in the diff" width="1920" height="1080" loading="lazy" decoding="async">
-          <p class="showcase-caption">Search across all files with results grouped in the sidebar.</p>
-        </div>
-      </div>
-    </div>
-  </section>
+    </section>
 
-  <section class="features">
-    <div class="container">
-      <h2 class="section-title">Features</h2>
-      <div class="feature-grid">
-        <div class="feature">
-          <h3>Syntax highlighting</h3>
-          <p>Built-in support for 50+ languages via syntect. Bring your own .tmTheme or .sublime-syntax files.</p>
-        </div>
-        <div class="feature">
-          <h3>Hunk navigation</h3>
-          <p>Jump between changes with keyboard shortcuts. Folded unchanged regions keep focus on what matters.</p>
-        </div>
-        <div class="feature">
-          <h3>Keyboard-first</h3>
-          <p>Every action has a keybind. All keybinds are configurable. Press F1 to see them all.</p>
-        </div>
-        <div class="feature">
-          <h3>Rename detection</h3>
-          <p>Heuristic content-similarity scoring detects renamed and moved files automatically.</p>
-        </div>
-        <div class="feature">
-          <h3>Git integration</h3>
-          <p>Use as a git difftool. The included git-revisa wrapper also supports reviewing GitHub PRs via the gh CLI.
-          </p>
-        </div>
-        <div class="feature">
-          <h3>Configurable</h3>
-          <p>Colors, fonts, keybinds, fold behavior, and more — all tweakable via a TOML config file.</p>
+    <section class="features">
+      <div class="container">
+        <h2 class="section-title">Features</h2>
+        <div class="feature-grid">
+          <div class="feature">
+            <h3>Syntax highlighting</h3>
+            <p>Built-in support for 50+ languages via syntect. Bring your own .tmTheme or .sublime-syntax files.</p>
+          </div>
+          <div class="feature">
+            <h3>Hunk navigation</h3>
+            <p>Jump between changes with keyboard shortcuts. Folded unchanged regions keep focus on what matters.</p>
+          </div>
+          <div class="feature">
+            <h3>Keyboard-first</h3>
+            <p>Every action has a keybind. All keybinds are configurable. Press F1 to see them all.</p>
+          </div>
+          <div class="feature">
+            <h3>Rename detection</h3>
+            <p>Heuristic content-similarity scoring detects renamed and moved files automatically.</p>
+          </div>
+          <div class="feature">
+            <h3>Git integration</h3>
+            <p>Use as a git difftool. The included git-revisa wrapper also supports reviewing GitHub PRs via the gh CLI.
+            </p>
+          </div>
+          <div class="feature">
+            <h3>Configurable</h3>
+            <p>Colors, fonts, keybinds, fold behavior, and more — all tweakable via a TOML config file.</p>
+          </div>
         </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section class="install">
-    <div class="container">
-      <h2 class="section-title">Install</h2>
-      <div class="install-methods">
-        <div class="install-method recommended">
-          <h3>Using <a href="https://mise.jdx.dev/">mise</a> <span class="badge">recommended</span></h3>
-          <pre><code>mise use --global github:guille/revisa</code></pre>
-        </div>
-        <div class="install-method">
-          <h3>From GitHub releases</h3>
-          <pre><code>tar xzf revisa_v*_linux_amd64.tar.gz
+    <section class="install">
+      <div class="container">
+        <h2 class="section-title">Install</h2>
+        <div class="install-methods">
+          <div class="install-method recommended">
+            <h3>Using <a href="https://mise.jdx.dev/">mise</a> <span class="badge">recommended</span></h3>
+            <pre><code>mise use --global github:guille/revisa</code></pre>
+          </div>
+          <div class="install-method">
+            <h3>From GitHub releases</h3>
+            <pre><code>tar xzf revisa_v*_linux_amd64.tar.gz
 sudo install -m 755 revisa_*/revisa revisa_*/git-revisa /usr/local/bin/</code></pre>
-          <p><a href="https://github.com/guille/revisa/releases/latest">Download latest release</a></p>
-        </div>
-        <div class="install-method">
-          <h3>From source</h3>
-          <pre><code>cargo install --git https://github.com/guille/revisa.git</code></pre>
+            <p><a href="https://github.com/guille/revisa/releases/latest">Download latest release</a></p>
+          </div>
+          <div class="install-method">
+            <h3>From source</h3>
+            <pre><code>cargo install --git https://github.com/guille/revisa.git</code></pre>
+          </div>
         </div>
       </div>
-    </div>
-  </section>
+    </section>
+  </main>
 
   <footer>
     <div class="container">
@@ -154,6 +161,20 @@ sudo install -m 755 revisa_*/revisa revisa_*/git-revisa /usr/local/bin/</code></
       for (const src of ['unified.webp', 'picker.webp', 'search.webp']) {
         new Image().src = src;
       }
+    });
+    // Copy buttons for install code blocks
+    document.querySelectorAll('.install-method pre').forEach(pre => {
+      const btn = document.createElement('button');
+      btn.className = 'copy-btn';
+      btn.setAttribute('aria-label', 'Copy to clipboard');
+      btn.textContent = 'Copy';
+      btn.addEventListener('click', () => {
+        navigator.clipboard.writeText(pre.querySelector('code').textContent).then(() => {
+          btn.textContent = 'Copied!';
+          setTimeout(() => btn.textContent = 'Copy', 1500);
+        });
+      });
+      pre.appendChild(btn);
     });
   </script>
 </body>

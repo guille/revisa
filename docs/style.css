@@ -11,7 +11,7 @@
   --bg-surface: #161b22;
   --text: #e6edf3;
   --text-muted: #8b949e;
-  --text-faint: #6e7681;
+  --text-faint: #8b949e;
   --accent: #a3845b;
   --accent-hover: #c4a67b;
   --border: #30363d;
@@ -263,6 +263,7 @@ html {
 }
 
 .install-method pre {
+  position: relative;
   background: var(--code-bg);
   border-radius: 6px;
   padding: 1rem;
@@ -270,7 +271,32 @@ html {
   font-size: 0.875rem;
   line-height: 1.5;
   max-width: 100%;
-  user-select: all;
+}
+
+.copy-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.install-method pre:hover .copy-btn,
+.copy-btn:focus-visible {
+  opacity: 1;
+}
+
+.copy-btn:hover {
+  color: var(--text);
+  border-color: var(--text-muted);
 }
 
 .install-method code {
@@ -345,6 +371,10 @@ footer a:hover {
 
   .tagline {
     font-size: 1.1rem;
+  }
+
+  .showcase-panel img {
+    border-radius: 6px;
   }
 
   .feature-grid {
