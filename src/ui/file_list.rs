@@ -52,39 +52,72 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
     let reviewed_count = state.cached_reviewed_count;
     let total_count = state.cached_visible_count;
+    let total_added = state.cached_total_added;
+    let total_deleted = state.cached_total_deleted;
+
+    // Pre-measure widths using a single galley call for the monospace font.
+    let reviewed_text = format!("{reviewed_count}/{total_count} reviewed");
+    let mono_font = egui::FontId::monospace(sidebar_font_size);
+    let char_width = ui
+        .painter()
+        .layout_no_wrap("0".to_string(), mono_font.clone(), egui::Color32::WHITE)
+        .size()
+        .x;
+    let reviewed_width = reviewed_text.len() as f32 * char_width;
+
+    // Build stat text: "+N −M" with char-count based width estimate.
+    let added_text = if total_added > 0 {
+        Some(format!("+{total_added}"))
+    } else {
+        None
+    };
+    let deleted_text = if total_deleted > 0 {
+        Some(format!("−{total_deleted}"))
+    } else {
+        None
+    };
+    let stat_char_count = added_text.as_ref().map_or(0, String::len)
+        + deleted_text.as_ref().map_or(0, |t| t.chars().count()) // "−" is multi-byte
+        + usize::from(added_text.is_some() && deleted_text.is_some()); // space separator
+    let stat_width = stat_char_count as f32 * char_width;
+
+    let available = ui.available_width();
+    let spacing = ui.spacing().item_spacing.x * 2.0;
+    let show_stats = stat_char_count > 0 && (reviewed_width + stat_width + spacing) <= available;
+
     ui.horizontal(|ui| {
         ns_label(
             ui,
-            egui::RichText::new(format!("{reviewed_count}/{total_count} reviewed"))
+            egui::RichText::new(reviewed_text)
                 .monospace()
                 .size(sidebar_font_size)
                 .color(egui::Color32::from_rgb(0x8B, 0x94, 0x9E)),
         );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let total_added = state.cached_total_added;
-            let total_deleted = state.cached_total_deleted;
-            if total_deleted > 0 {
-                ns_label(
-                    ui,
-                    egui::RichText::new(format!("−{total_deleted}"))
-                        .monospace()
-                        .size(sidebar_font_size)
-                        .color(COLOR_DELETED),
-                );
-            }
-            if total_added > 0 && total_deleted > 0 {
-                ns_label(ui, egui::RichText::new(" ").size(sidebar_font_size));
-            }
-            if total_added > 0 {
-                ns_label(
-                    ui,
-                    egui::RichText::new(format!("+{total_added}"))
-                        .monospace()
-                        .size(sidebar_font_size)
-                        .color(COLOR_ADDED),
-                );
-            }
-        });
+        if show_stats {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(ref text) = deleted_text {
+                    ns_label(
+                        ui,
+                        egui::RichText::new(text)
+                            .monospace()
+                            .size(sidebar_font_size)
+                            .color(COLOR_DELETED),
+                    );
+                }
+                if added_text.is_some() && deleted_text.is_some() {
+                    ns_label(ui, egui::RichText::new(" ").size(sidebar_font_size));
+                }
+                if let Some(ref text) = added_text {
+                    ns_label(
+                        ui,
+                        egui::RichText::new(text)
+                            .monospace()
+                            .size(sidebar_font_size)
+                            .color(COLOR_ADDED),
+                    );
+                }
+            });
+        }
     });
     ui.add_space(4.0);
 
