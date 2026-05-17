@@ -16,6 +16,9 @@
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://revisa.guillerg.dev">
   <link rel="preload" as="image" href="side-by-side.webp" type="image/webp">
+  <link rel="preload" as="image" href="unified.webp" type="image/webp">
+  <link rel="preload" as="image" href="picker.webp" type="image/webp">
+  <link rel="preload" as="image" href="search.webp" type="image/webp">
   <link rel="stylesheet" href="style.css">
 </head>
 
@@ -48,22 +51,22 @@
         <div class="showcase-panels">
           <div class="showcase-panel active" data-panel="side-by-side">
             <img src="side-by-side.webp" alt="Side-by-side diff view with word-level inline highlights" width="1920"
-              height="1050" loading="eager" decoding="async" fetchpriority="high">
+              height="1050" fetchpriority="high" decoding="sync">
             <p class="showcase-caption">Scroll-synced side-by-side view with word-level inline diff highlighting.</p>
           </div>
           <div class="showcase-panel" data-panel="unified">
             <img src="unified.webp" alt="Unified stacked diff view with dual gutter" width="1920" height="1047"
-              loading="lazy" decoding="async">
+              fetchpriority="low" decoding="async">
             <p class="showcase-caption">Unified (stacked) view with dual gutter showing old and new line numbers.</p>
           </div>
           <div class="showcase-panel" data-panel="picker">
-            <img src="picker.webp" alt="Quick picker with fuzzy file search" width="1920" height="1050" loading="lazy"
-              decoding="async">
+            <img src="picker.webp" alt="Quick picker with fuzzy file search" width="1920" height="1050"
+              fetchpriority="low" decoding="async">
             <p class="showcase-caption">Ctrl+P fuzzy search to jump to any file instantly.</p>
           </div>
           <div class="showcase-panel" data-panel="search">
-            <img src="search.webp" alt="Search across all files in the diff" width="1920" height="1048" loading="lazy"
-              decoding="async">
+            <img src="search.webp" alt="Search across all files in the diff" width="1920" height="1048"
+              fetchpriority="low" decoding="async">
             <p class="showcase-caption">Search across all files with results grouped in the sidebar.</p>
           </div>
         </div>
@@ -156,12 +159,6 @@ sudo install -m 755 revisa_*/revisa revisa_*/git-revisa /usr/local/bin/</code></
         p.classList.toggle('active', p.dataset.panel === id);
       });
     });
-    // Prefetch tab images after page load so they're ready on first switch
-    window.addEventListener('load', () => {
-      for (const src of ['unified.webp', 'picker.webp', 'search.webp']) {
-        new Image().src = src;
-      }
-    });
     // Copy buttons for install code blocks
     document.querySelectorAll('.install-method pre').forEach(pre => {
       const btn = document.createElement('button');
@@ -175,6 +172,10 @@ sudo install -m 755 revisa_*/revisa revisa_*/git-revisa /usr/local/bin/</code></
         });
       });
       pre.appendChild(btn);
+    });
+    // Pre-decode hidden tab images so first switch is instant
+    document.querySelectorAll('.showcase-panel:not(.active) img').forEach(img => {
+      img.decode().catch(() => {});
     });
   </script>
 </body>

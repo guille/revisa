@@ -153,17 +153,31 @@ html {
   background: rgba(163, 132, 91, 0.08);
 }
 
+.showcase-panels {
+  display: grid;
+  /* All panels stack in same cell — tallest one defines height */
+}
+
 .showcase-panel {
-  display: none;
+  grid-area: 1 / 1;
+  display: flex;
+  flex-direction: column;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .showcase-panel.active {
-  display: block;
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .showcase-panel img {
-  max-width: 100%;
+  width: 100%;
   height: auto;
+  aspect-ratio: 1920 / 1050;
+  object-fit: cover;
   border-radius: 12px;
   border: 1px solid rgba(163, 132, 91, 0.2);
   box-shadow:
@@ -173,6 +187,7 @@ html {
 
 .showcase-caption {
   margin-top: 1rem;
+  min-height: 2.8em;
   font-size: 0.9rem;
   color: var(--text-faint);
 }
