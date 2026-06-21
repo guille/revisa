@@ -205,7 +205,7 @@ fn configure_fonts(
         .collect();
 
     for family in &candidates {
-        if let Some(regular_font) = fc.find(family, None)
+        if let Ok(regular_font) = fc.find(family, None)
             && let Ok(data) = std::fs::read(&regular_font.path)
         {
             let font_key = family.to_string();
@@ -238,7 +238,7 @@ fn configure_fonts(
             ];
             let mut available = [false; 3];
             for (i, (style, key)) in variants.iter().enumerate() {
-                if let Some(variant_font) = fc.find(family, Some(style)) {
+                if let Ok(variant_font) = fc.find(family, Some(style)) {
                     // Only register if it's a different file than regular.
                     // NOTE: This fails for variable fonts (single .ttf with all weights/styles),
                     // where the bold variant lives in the same file. These fonts will fall back
