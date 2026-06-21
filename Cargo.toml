@@ -20,7 +20,7 @@ eframe     = { version = "0.34", default-features = false, features = [
   "wgpu",
   "x11",
 ] }
-fontconfig = { version = "0.10", default-features = false, features = ["dlopen"] }
+fontconfig = { version = "0.11", default-features = false, features = ["dlopen"] }
 rayon      = "1"
 serde      = { version = "1", features = ["derive"] }
 similar    = "3"
