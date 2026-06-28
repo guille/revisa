@@ -15,7 +15,7 @@ clap       = { version = "4", default-features = false, features = [
   "std",
   "usage"
 ] }
-eframe     = { version = "0.34", default-features = false, features = [
+eframe     = { version = "0.35", default-features = false, features = [
   "wayland",
   "wgpu",
   "x11",
