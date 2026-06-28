@@ -217,7 +217,7 @@ fn show_inner(ui: &mut egui::Ui, state: &mut AppState, handle_input_enabled: boo
 
     let resp = egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(state.diff_view_ctx.gutter_bg))
-        .show_inside(ui, |ui| {
+        .show(ui, |ui| {
             // NOTE: We mutate state inside this render closure to capture diff_rect
             // and clamp scroll from within CentralPanel, where the available rect
             // accurately reflects space after sidebar and status bar panels.
@@ -1628,7 +1628,7 @@ fn build_layout_job(
 
 /// Show a centered spinner with a "Computing diff..." label.
 fn show_loading_spinner(ui: &mut egui::Ui) {
-    egui::CentralPanel::default().show_inside(ui, |ui| {
+    egui::CentralPanel::default().show(ui, |ui| {
         ui.vertical_centered(|ui| {
             let available = ui.available_height();
             ui.add_space(available / 2.0 - 30.0);

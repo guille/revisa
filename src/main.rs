@@ -483,7 +483,7 @@ impl eframe::App for RevisaApp {
                 .default_size(sidebar_default)
                 .min_size(ui::file_list::SIDEBAR_MIN_WIDTH)
                 .max_size(sidebar_max)
-                .show_inside(root_ui, |ui| {
+                .show(root_ui, |ui| {
                     if self.state.search.open {
                         ui::search_panel::show(ui, &mut self.state);
                     } else {
@@ -504,7 +504,7 @@ impl eframe::App for RevisaApp {
                     .stroke(egui::Stroke::new(1.0, border_color))
                     .inner_margin(egui::Margin::symmetric(ui::common::PANEL_H_MARGIN_I8, 0)),
             )
-            .show_inside(root_ui, |ui| {
+            .show(root_ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui::status_bar::show(ui, &mut self.state, status_bar_font_size);
                 });

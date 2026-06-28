@@ -663,7 +663,7 @@ fn highlighted_layout(
         }
         job.sections.push(LayoutSection {
             leading_space: 0.0,
-            byte_range: start..i,
+            byte_range: eframe::egui::text::ByteIndex(start)..eframe::egui::text::ByteIndex(i),
             format: if is_match {
                 highlight_fmt.clone()
             } else {
@@ -676,7 +676,7 @@ fn highlighted_layout(
         // Empty text fallback.
         job.sections.push(LayoutSection {
             leading_space: 0.0,
-            byte_range: 0..0,
+            byte_range: eframe::egui::text::ByteIndex(0)..eframe::egui::text::ByteIndex(0),
             format: normal_fmt,
         });
     }
