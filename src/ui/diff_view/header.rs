@@ -64,7 +64,8 @@ pub(super) fn render_unified_header(
             let pointer_pos = ui.input(|i| i.pointer.interact_pos());
             let was_clicked = ui.input(|i| i.pointer.any_click());
 
-            let recently_copied = copied_at.is_some_and(|t| t.elapsed().as_secs_f32() < 2.0);
+            let recently_copied =
+                copied_at.is_some_and(|t| t.elapsed().as_secs_f32() < super::COPY_FEEDBACK_SECS);
             let copy_icon = if recently_copied {
                 "\u{f00c}"
             } else {

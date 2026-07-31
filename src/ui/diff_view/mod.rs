@@ -520,14 +520,18 @@ fn render_header_and_dispatch(
         ui.ctx().copy_text(path);
         state.copied_at = Some(std::time::Instant::now());
     }
-    // Request repaint while showing "copied" feedback.
-    if state
-        .copied_at
-        .is_some_and(|t| t.elapsed().as_secs_f32() < 2.0)
-    {
-        ui.ctx().request_repaint();
+    // Wake up exactly once, when the "copied" feedback expires.
+    if let Some(t) = state.copied_at {
+        let remaining = COPY_FEEDBACK_SECS - t.elapsed().as_secs_f32();
+        if remaining > 0.0 {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f32(remaining));
+        }
     }
 }
+
+/// How long the "copied to clipboard" feedback icon is shown.
+pub(super) const COPY_FEEDBACK_SECS: f32 = 2.0;
 
 /// Height of the horizontal scrollbar track in pixels.
 const H_SCROLLBAR_HEIGHT: f32 = 8.0;
@@ -642,11 +646,6 @@ fn render_h_scrollbar(
         H_SCROLLBAR_HEIGHT / 2.0,
         egui::Color32::from_white_alpha(thumb_alpha),
     );
-
-    // Request repaint while hovering for responsive opacity changes.
-    if pointer_in_track {
-        ui.ctx().request_repaint();
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
