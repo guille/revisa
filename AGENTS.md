@@ -99,6 +99,7 @@ This project uses **mise**. Prefer `mise run build` / `mise run test` over direc
 ### CLI
 - `revisa diff --left /path/left --right /path/right [--config /path/config.toml]`
 - `revisa build-cache` — prebuild syntax cache for faster startup
+- `revisa bench` (dev-tools feature) — domain-layer benchmark suite over a generated corpus; see BENCH.md
 
 ## Out of Scope
 - Accessibility

@@ -20,7 +20,12 @@ run         = "cargo run"
 description = "Run the project (release mode)"
 run         = "cargo run --release"
 
+[tasks.bench]
+description = "Run the domain benchmark suite (release, dev-tools)"
+run         = "cargo run --release --features dev-tools -- bench"
+
 [tasks.test]
+depends     = "fmt"
 description = "Run tests"
 run         = "cargo test"
 
@@ -29,6 +34,7 @@ description = "Format code"
 run         = "cargo fmt"
 
 [tasks.lint]
+depends     = "fmt"
 description = "Run clippy"
 run         = "cargo clippy --all-targets --all-features -- -D warnings"
 

@@ -1,4 +1,6 @@
 mod app;
+#[cfg(feature = "dev-tools")]
+mod bench;
 mod domain;
 mod highlight;
 mod ui;
@@ -52,6 +54,38 @@ enum Command {
         #[arg(long)]
         bundled: bool,
     },
+    /// (Dev only) Run the domain-layer benchmark suite over a generated
+    /// corpus (or an external left/right pair).
+    #[cfg(feature = "dev-tools")]
+    Bench {
+        /// Only report stages whose name contains this substring.
+        #[arg(long)]
+        filter: Option<String>,
+
+        /// Benchmark an existing left directory instead of generating a corpus.
+        #[arg(long, requires = "right")]
+        left: Option<PathBuf>,
+
+        /// Benchmark an existing right directory instead of generating a corpus.
+        #[arg(long, requires = "left")]
+        right: Option<PathBuf>,
+
+        /// Corpus size multiplier.
+        #[arg(long, default_value_t = 1)]
+        scale: usize,
+
+        /// Timed iterations per stage; the median is reported.
+        #[arg(long, default_value_t = 3)]
+        iterations: usize,
+
+        /// Corpus generator seed.
+        #[arg(long, default_value_t = 0x00C0_FFEE)]
+        seed: u64,
+
+        /// Emit JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() {
@@ -77,6 +111,26 @@ fn main() {
                 return;
             }
             run_build_cache(syntaxes_dir);
+        }
+        #[cfg(feature = "dev-tools")]
+        Command::Bench {
+            filter,
+            left,
+            right,
+            scale,
+            iterations,
+            seed,
+            json,
+        } => {
+            bench::run(&bench::Options {
+                filter,
+                left,
+                right,
+                scale,
+                iterations,
+                seed,
+                json,
+            });
         }
     }
 }
