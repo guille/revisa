@@ -378,48 +378,44 @@ pub fn navigate_to_match(state: &mut AppState, m: &crate::domain::search::Search
         state.select_file(m.file_index);
     }
 
-    // Ensure diff data is available.
     let idx = state.selected_file;
-    if !state.diff_cache.contains_key(&idx) {
-        let pair = &state.file_pairs[idx];
-        let (_, old, new, diff, is_binary) = crate::app::read_and_diff(pair);
-        let data = if is_binary {
-            crate::app::FileDiffData::binary_placeholder(
-                state.settings.behavior.fold_context,
-                state.settings.behavior.fold_expand_step,
-                state.settings.behavior.fold_row_height,
-            )
-        } else {
-            let filename = pair.relative_path.to_string_lossy();
-            let old_filename = pair
-                .old_relative_path
-                .as_ref()
-                .map_or_else(|| filename.clone(), |p| p.to_string_lossy());
-            crate::app::compute_diff_from_contents_with_diff(
-                old,
-                new,
-                Some(diff),
-                &filename,
-                &old_filename,
-                &state.highlighter,
-                &state.settings,
-                false,
-            )
-        };
-        state.diff_cache.insert(idx, data);
-        state.galley_cache.borrow_mut().invalidate_file(idx);
-        state.files_computed += 1;
+    if state.diff_cache.contains_key(&idx) {
+        expose_and_center(state, idx, m.data_row);
+    } else {
+        // Diff not computed yet — compute on a background thread and finish
+        // the navigation when it lands, instead of freezing the UI thread.
+        state.dispatch_force_compute(idx);
+        state.scroll.pending_search_nav = Some((idx, m.data_row));
     }
+}
 
-    // Auto-unfold if match is in a folded region.
+/// Finish a deferred search navigation once the target diff is available.
+/// Called every frame from the diff view; cheap no-op when nothing is pending.
+pub fn apply_pending_search_nav(state: &mut AppState) {
+    let Some((idx, data_row)) = state.scroll.pending_search_nav else {
+        return;
+    };
+    if idx != state.selected_file {
+        // User navigated elsewhere while the diff was computing.
+        state.scroll.pending_search_nav = None;
+        return;
+    }
+    if state.diff_cache.contains_key(&idx) {
+        state.scroll.pending_search_nav = None;
+        expose_and_center(state, idx, data_row);
+    }
+}
+
+/// Auto-unfold the match's region and center the view on it.
+fn expose_and_center(state: &mut AppState, idx: usize, data_row: usize) {
     if let Some(diff_data) = state.diff_cache.get_mut(&idx) {
-        diff_data.fold_state.expose_data_row(m.data_row);
+        diff_data.fold_state.expose_data_row(data_row);
         diff_data.ensure_unified_offsets_if_needed(state.diff_mode);
 
         // Convert data_row to view_row and set pending_center_row.
         if let Some(view_row) = diff_data
             .fold_state
-            .data_to_view_row_for_mode(m.data_row, state.diff_mode)
+            .data_to_view_row_for_mode(data_row, state.diff_mode)
         {
             state.scroll.pending_center_row = Some(view_row);
         }

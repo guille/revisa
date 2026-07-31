@@ -240,6 +240,9 @@ pub struct ScrollState {
     /// If set, navigate to this 1-based source line once the diff data becomes available.
     /// Used when goto-line is requested before the background diff has finished.
     pub pending_goto_line: Option<usize>,
+    /// Deferred search navigation (file, data_row), set when the target
+    /// file's diff is still being computed; applied when it lands.
+    pub pending_search_nav: Option<(usize, usize)>,
 }
 
 /// State for the "review complete" popup notification.

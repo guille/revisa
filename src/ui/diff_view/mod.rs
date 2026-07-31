@@ -174,8 +174,9 @@ fn show_inner(ui: &mut egui::Ui, state: &mut AppState, handle_input_enabled: boo
         return;
     }
 
-    // Apply deferred goto-line if the diff just became available.
+    // Apply deferred goto-line / search navigation if the diff just became available.
     apply_pending_goto_line(state);
+    crate::ui::search_panel::apply_pending_search_nav(state);
 
     let diff_mode = state.diff_mode;
     // NOTE: total_view_rows_for_mode ensures unified offsets are computed when in unified mode.
