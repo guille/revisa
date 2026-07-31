@@ -5,7 +5,7 @@ use crate::app::{AppState, FileDiffData};
 use crate::domain::fold::{DiffMode, FoldState, Segment, UnifiedSubRow};
 use crate::domain::hunk::AlignedRow;
 use crate::domain::settings::Settings;
-use crate::highlight::StyledSpan;
+use crate::highlight::{PackedSpan, SpanStyle, StyledRows};
 use crate::ui::common::{
     FONT_BOLD, FONT_BOLD_ITALIC, FONT_ITALIC, icon_fold_down, icon_fold_single, icon_fold_up,
 };
@@ -1257,18 +1257,19 @@ fn render_unified_data_row(
     let (styled, line_text) = match (sub, row) {
         (UnifiedSubRow::New, AlignedRow::Both { right_line, .. })
         | (_, AlignedRow::RightOnly { right_line }) => (
-            &data.right_styled[data_idx],
+            data.right_styled.row(data_idx),
             data.new_lines.line(*right_line),
         ),
-        (_, AlignedRow::Both { left_line, .. } | AlignedRow::LeftOnly { left_line }) => {
-            (&data.left_styled[data_idx], data.old_lines.line(*left_line))
-        }
+        (_, AlignedRow::Both { left_line, .. } | AlignedRow::LeftOnly { left_line }) => (
+            data.left_styled.row(data_idx),
+            data.old_lines.line(*left_line),
+        ),
     };
 
     if styled.is_empty() {
         0.0
     } else {
-        let layout_job = build_layout_job(line_text, styled, vctx.font_size, vctx);
+        let layout_job = build_layout_job(line_text, styled, &data.styles, vctx.font_size, vctx);
         let galley = text_painter.layout_job(layout_job);
         let width = galley.size().x;
         let text_pos = egui::pos2(
@@ -1312,7 +1313,7 @@ fn render_data_row(
     data: &FileDiffData,
     row: &AlignedRow,
     data_idx: usize,
-    styled_rows: &[Vec<StyledSpan>],
+    styled_rows: &StyledRows,
     side: PanelSide,
     panel_width: f32,
     search_matches: &[crate::domain::search::SearchMatch],
@@ -1413,7 +1414,7 @@ fn render_data_row(
     }
 
     // Draw syntax-highlighted text.
-    let styled = &styled_rows[data_idx];
+    let styled = styled_rows.row(data_idx);
     if styled.is_empty() {
         0.0
     } else {
@@ -1428,7 +1429,7 @@ fn render_data_row(
             ) => data.new_lines.line(*right_line),
             _ => "",
         };
-        let layout_job = build_layout_job(line_text, styled, vctx.font_size, vctx);
+        let layout_job = build_layout_job(line_text, styled, &data.styles, vctx.font_size, vctx);
         let galley = text_painter.layout_job(layout_job);
         let width = galley.size().x;
         let text_pos = egui::pos2(left_x + GUTTER_WIDTH - scroll_x, y + vctx.text_y_offset);
@@ -1576,10 +1577,11 @@ fn render_fold_row(fctx: &FoldRowCtx, icon: &str, text: &str, hover_pos: Option<
     painter.galley(right_icon_pos, icon_galley, vctx.fg_fold_text);
 }
 
-/// Build an egui LayoutJob from styled spans.
+/// Build an egui LayoutJob from packed styled spans.
 fn build_layout_job(
     text: &str,
-    spans: &[StyledSpan],
+    spans: &[PackedSpan],
+    styles: &[SpanStyle],
     font_size: f32,
     vctx: &DiffViewCtx,
 ) -> egui::text::LayoutJob {
@@ -1587,24 +1589,34 @@ fn build_layout_job(
     job.wrap.max_width = f32::INFINITY; // no wrapping
 
     for span in spans {
-        let span_text = &text[span.range.clone()];
-        let fg =
-            egui::Color32::from_rgba_unmultiplied(span.fg[0], span.fg[1], span.fg[2], span.fg[3]);
-        let bg = if span.bg[3] > 0 {
-            egui::Color32::from_rgba_unmultiplied(span.bg[0], span.bg[1], span.bg[2], span.bg[3])
+        let span_text = &text[span.range()];
+        let style = styles[usize::from(span.style)];
+        let fg = egui::Color32::from_rgba_unmultiplied(
+            style.fg[0],
+            style.fg[1],
+            style.fg[2],
+            style.fg[3],
+        );
+        let bg = if style.bg[3] > 0 {
+            egui::Color32::from_rgba_unmultiplied(
+                style.bg[0],
+                style.bg[1],
+                style.bg[2],
+                style.bg[3],
+            )
         } else {
             egui::Color32::TRANSPARENT
         };
 
-        let family = match (span.bold, span.italic) {
+        let family = match (style.bold, style.italic) {
             (true, true) => vctx.font_bold_italic.clone(),
             (true, false) => vctx.font_bold.clone(),
             (false, true) => vctx.font_italic.clone(),
             (false, false) => egui::FontFamily::Monospace,
         };
         // Use synthetic italics when the selected font family doesn't include italic.
-        let use_synthetic_italic = span.italic
-            && if span.bold {
+        let use_synthetic_italic = style.italic
+            && if style.bold {
                 vctx.synthetic_bold_italic
             } else {
                 family == egui::FontFamily::Monospace

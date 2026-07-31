@@ -24,6 +24,121 @@ pub struct StyledSpan {
     pub italic: bool,
 }
 
+/// A span style, de-duplicated per file into a small table. A theme yields a
+/// few dozen distinct (fg, bg, flags) combinations, shared by thousands of spans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SpanStyle {
+    pub fg: [u8; 4],
+    pub bg: [u8; 4],
+    pub bold: bool,
+    pub italic: bool,
+}
+
+/// A packed styled span: byte range into the line plus a style-table index.
+/// 8 bytes vs 40 for `StyledSpan`; spans longer than `u16::MAX` bytes are
+/// split into same-style chunks at build time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedSpan {
+    pub start: u32,
+    pub len: u16,
+    pub style: u16,
+}
+
+impl PackedSpan {
+    pub fn range(self) -> Range<usize> {
+        self.start as usize..self.start as usize + self.len as usize
+    }
+}
+
+/// Interns `SpanStyle`s into a compact table during composition.
+#[derive(Default)]
+pub struct StyleInterner {
+    styles: Vec<SpanStyle>,
+    lookup: std::collections::HashMap<SpanStyle, u16>,
+}
+
+impl StyleInterner {
+    pub fn intern(&mut self, style: SpanStyle) -> u16 {
+        if let Some(&id) = self.lookup.get(&style) {
+            return id;
+        }
+        // A full table is practically impossible (styles are theme scopes ×
+        // diff backgrounds); degrade to style 0 rather than grow past u16.
+        if self.styles.len() > usize::from(u16::MAX) {
+            return 0;
+        }
+        let id = self.styles.len() as u16;
+        self.styles.push(style);
+        self.lookup.insert(style, id);
+        id
+    }
+
+    /// Consume the interner, keeping only the table.
+    pub fn finish(self) -> Vec<SpanStyle> {
+        self.styles
+    }
+}
+
+/// Flat per-row styled spans: one contiguous span buffer plus a row-offset
+/// index. Replaces a `Vec<Vec<StyledSpan>>` — no per-row heap allocation,
+/// and styles live in a shared table referenced by index.
+#[derive(Default)]
+pub struct StyledRows {
+    spans: Vec<PackedSpan>,
+    /// Row `r`'s spans live at `spans[row_offsets[r]..row_offsets[r + 1]]`.
+    row_offsets: Vec<u32>,
+}
+
+impl StyledRows {
+    pub fn with_row_capacity(rows: usize) -> Self {
+        let mut row_offsets = Vec::with_capacity(rows + 1);
+        row_offsets.push(0);
+        Self {
+            spans: Vec::new(),
+            row_offsets,
+        }
+    }
+
+    /// Pack one row of composed spans, interning their styles.
+    pub fn push_row(&mut self, row: &[StyledSpan], interner: &mut StyleInterner) {
+        for span in row {
+            let style = interner.intern(SpanStyle {
+                fg: span.fg,
+                bg: span.bg,
+                bold: span.bold,
+                italic: span.italic,
+            });
+            let mut start = span.range.start;
+            while start < span.range.end {
+                let len = (span.range.end - start).min(usize::from(u16::MAX));
+                self.spans.push(PackedSpan {
+                    start: start as u32,
+                    len: len as u16,
+                    style,
+                });
+                start += len;
+            }
+        }
+        self.row_offsets.push(self.spans.len() as u32);
+    }
+
+    /// Spans for a row; empty for out-of-range rows (e.g. placeholders).
+    pub fn row(&self, idx: usize) -> &[PackedSpan] {
+        match (self.row_offsets.get(idx), self.row_offsets.get(idx + 1)) {
+            (Some(&start), Some(&end)) => &self.spans[start as usize..end as usize],
+            _ => &[],
+        }
+    }
+
+    pub fn span_count(&self) -> usize {
+        self.spans.len()
+    }
+
+    pub fn row_count(&self) -> usize {
+        self.row_offsets.len().saturating_sub(1)
+    }
+}
+
 /// Cached syntax highlighting data for a file: per-line spans.
 pub struct HighlightedFile {
     /// Per-line syntax spans: Vec of (style, byte_range) for each line.
@@ -396,5 +511,64 @@ mod tests {
         assert_eq!(c.resolve(DiffBg::Removed), c.removed);
         assert_eq!(c.resolve(DiffBg::ModifiedNew), c.added);
         assert_eq!(c.resolve(DiffBg::ModifiedOld), c.removed);
+    }
+
+    fn styled(range: Range<usize>, fg: [u8; 4], bold: bool) -> StyledSpan {
+        StyledSpan {
+            range,
+            fg,
+            bg: [0, 0, 0, 0],
+            bold,
+            italic: false,
+        }
+    }
+
+    #[test]
+    fn test_styled_rows_pack_and_lookup() {
+        let mut interner = StyleInterner::default();
+        let mut rows = StyledRows::with_row_capacity(3);
+        let red = [255, 0, 0, 255];
+        let blue = [0, 0, 255, 255];
+        rows.push_row(
+            &[styled(0..4, red, false), styled(4..9, blue, true)],
+            &mut interner,
+        );
+        rows.push_row(&[], &mut interner);
+        rows.push_row(&[styled(2..6, red, false)], &mut interner);
+        let styles = interner.finish();
+
+        // red/plain is shared between rows 0 and 2 — three spans, two styles.
+        assert_eq!(styles.len(), 2);
+        assert_eq!(rows.span_count(), 3);
+        assert_eq!(rows.row_count(), 3);
+
+        let r0 = rows.row(0);
+        assert_eq!(r0.len(), 2);
+        assert_eq!(r0[0].range(), 0..4);
+        assert_eq!(styles[usize::from(r0[0].style)].fg, red);
+        assert_eq!(r0[1].range(), 4..9);
+        assert!(styles[usize::from(r0[1].style)].bold);
+
+        assert!(rows.row(1).is_empty());
+        assert_eq!(rows.row(2)[0].style, r0[0].style);
+        // Out of range (incl. default-constructed placeholders) → empty.
+        assert!(rows.row(3).is_empty());
+        assert!(StyledRows::default().row(0).is_empty());
+    }
+
+    #[test]
+    fn test_styled_rows_splits_oversized_spans() {
+        let mut interner = StyleInterner::default();
+        let mut rows = StyledRows::with_row_capacity(1);
+        let huge = usize::from(u16::MAX) * 2 + 10;
+        rows.push_row(&[styled(0..huge, [1, 2, 3, 4], false)], &mut interner);
+
+        let spans = rows.row(0);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].range(), 0..usize::from(u16::MAX));
+        assert_eq!(spans[2].range().end, huge);
+        // Chunks are contiguous and same-style.
+        assert_eq!(spans[1].range().start, spans[0].range().end);
+        assert!(spans.iter().all(|s| s.style == spans[0].style));
     }
 }

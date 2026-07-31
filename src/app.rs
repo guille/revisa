@@ -4,7 +4,10 @@ use crate::domain::file_tree::{FlatEntry, TreeNode, build_tree, flatten_tree};
 use crate::domain::fold::{DiffMode, FoldState};
 use crate::domain::hunk::{AlignedRow, Hunk, build_aligned_rows, extract_hunks};
 use crate::domain::review_state::ReviewState;
-use crate::highlight::{DiffBg, DiffBgColors, Highlighter, StyledSpan, compose_line};
+use crate::highlight::{
+    DiffBg, DiffBgColors, Highlighter, SpanStyle, StyleInterner, StyledRows, StyledSpan,
+    compose_line,
+};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -127,8 +130,10 @@ pub struct FileDiffData {
     pub hunks: Vec<Hunk>,
     /// Pre-computed styled spans per aligned row, per side (left, right).
     /// Indexed by row index. Empty vec for padding rows.
-    pub left_styled: Vec<Vec<StyledSpan>>,
-    pub right_styled: Vec<Vec<StyledSpan>>,
+    pub left_styled: StyledRows,
+    pub right_styled: StyledRows,
+    /// De-duplicated styles referenced by `left_styled`/`right_styled`.
+    pub styles: Vec<SpanStyle>,
     /// If set, this file was too large for full diff computation.
     pub too_large_message: Option<String>,
     /// Whether this file is binary (non-UTF-8 content).
@@ -190,8 +195,9 @@ impl FileDiffData {
             new_lines: Arc::new(LineIndex::empty()),
             aligned_rows: Arc::new(vec![]),
             hunks: vec![],
-            left_styled: vec![],
-            right_styled: vec![],
+            left_styled: StyledRows::default(),
+            right_styled: StyledRows::default(),
+            styles: vec![],
             too_large_message: Some(msg.to_string()),
             binary: false,
             fold_state: FoldState::new(0, &[], fold_ctx, fold_exp, fold_rh),
@@ -204,8 +210,9 @@ impl FileDiffData {
             new_lines: Arc::new(LineIndex::empty()),
             aligned_rows: Arc::new(vec![]),
             hunks: vec![],
-            left_styled: vec![],
-            right_styled: vec![],
+            left_styled: StyledRows::default(),
+            right_styled: StyledRows::default(),
+            styles: vec![],
             too_large_message: None,
             binary: true,
             fold_state: FoldState::new(0, &[], fold_ctx, fold_exp, fold_rh),
@@ -1105,8 +1112,9 @@ pub fn compute_diff_from_contents_with_diff(
     let default_fg = highlighter.default_fg();
 
     // Pre-compute styled spans for all aligned rows.
-    let mut left_styled = Vec::with_capacity(aligned_rows.len());
-    let mut right_styled = Vec::with_capacity(aligned_rows.len());
+    let mut interner = StyleInterner::default();
+    let mut left_styled = StyledRows::with_row_capacity(aligned_rows.len());
+    let mut right_styled = StyledRows::with_row_capacity(aligned_rows.len());
 
     for (row_idx, row) in aligned_rows.iter().enumerate() {
         match row {
@@ -1142,7 +1150,7 @@ pub fn compute_diff_from_contents_with_diff(
                         inline_new_bg,
                     );
                 }
-                left_styled.push(styled_l);
+                left_styled.push_row(&styled_l, &mut interner);
 
                 // Right side.
                 let new_text = new_lines.get(*right_line).copied().unwrap_or("");
@@ -1171,7 +1179,7 @@ pub fn compute_diff_from_contents_with_diff(
                         inline_new_bg,
                     );
                 }
-                right_styled.push(styled_r);
+                right_styled.push_row(&styled_r, &mut interner);
             }
             AlignedRow::LeftOnly { left_line } => {
                 let old_text = old_lines.get(*left_line).copied().unwrap_or("");
@@ -1179,14 +1187,17 @@ pub fn compute_diff_from_contents_with_diff(
                     .lines
                     .get(*left_line)
                     .map_or(&[] as &[_], std::vec::Vec::as_slice);
-                left_styled.push(compose_line(
-                    old_syntax,
-                    DiffBg::Removed,
-                    old_text.len(),
-                    default_fg,
-                    diff_bg_colors,
-                ));
-                right_styled.push(vec![]);
+                left_styled.push_row(
+                    &compose_line(
+                        old_syntax,
+                        DiffBg::Removed,
+                        old_text.len(),
+                        default_fg,
+                        diff_bg_colors,
+                    ),
+                    &mut interner,
+                );
+                right_styled.push_row(&[], &mut interner);
             }
             AlignedRow::RightOnly { right_line } => {
                 let new_text = new_lines.get(*right_line).copied().unwrap_or("");
@@ -1194,14 +1205,17 @@ pub fn compute_diff_from_contents_with_diff(
                     .lines
                     .get(*right_line)
                     .map_or(&[] as &[_], std::vec::Vec::as_slice);
-                left_styled.push(vec![]);
-                right_styled.push(compose_line(
-                    new_syntax,
-                    DiffBg::Added,
-                    new_text.len(),
-                    default_fg,
-                    diff_bg_colors,
-                ));
+                left_styled.push_row(&[], &mut interner);
+                right_styled.push_row(
+                    &compose_line(
+                        new_syntax,
+                        DiffBg::Added,
+                        new_text.len(),
+                        default_fg,
+                        diff_bg_colors,
+                    ),
+                    &mut interner,
+                );
             }
         }
     }
@@ -1215,6 +1229,7 @@ pub fn compute_diff_from_contents_with_diff(
         hunks,
         left_styled,
         right_styled,
+        styles: interner.finish(),
         too_large_message: None,
         binary: false,
         fold_state,
@@ -1479,8 +1494,9 @@ mod tests {
                 new_lines: Arc::new(LineIndex::empty()),
                 aligned_rows: Arc::new(vec![]),
                 hunks: vec![],
-                left_styled: vec![],
-                right_styled: vec![],
+                left_styled: StyledRows::default(),
+                right_styled: StyledRows::default(),
+                styles: vec![],
                 too_large_message: None,
                 binary: false,
                 fold_state: crate::domain::fold::FoldState::new(0, &[], 3, 5, 20),

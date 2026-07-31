@@ -257,15 +257,17 @@ pub fn run(opts: &Options) {
             let rows: usize = datas.iter().map(|d| d.aligned_rows.len()).sum();
             let spans: usize = datas
                 .iter()
-                .flat_map(|d| d.left_styled.iter().chain(&d.right_styled))
-                .map(Vec::len)
+                .map(|d| d.left_styled.span_count() + d.right_styled.span_count())
                 .sum();
-            let span_size = size_of::<crate::highlight::StyledSpan>();
-            let vec_headers = datas
-                .iter()
-                .map(|d| d.left_styled.len() + d.right_styled.len())
-                .sum::<usize>()
-                * size_of::<Vec<()>>();
+            let styles: usize = datas.iter().map(|d| d.styles.len()).sum();
+            // Spans + row-offset indexes (u32 per row + 1) + style tables.
+            let bytes = spans * size_of::<crate::highlight::PackedSpan>()
+                + datas
+                    .iter()
+                    .map(|d| d.left_styled.row_count() + d.right_styled.row_count() + 2)
+                    .sum::<usize>()
+                    * size_of::<u32>()
+                + styles * size_of::<crate::highlight::SpanStyle>();
             results.push(StageResult {
                 name: "compose".to_string(),
                 wall_ms: walls[walls.len() / 2],
@@ -273,10 +275,8 @@ pub fn run(opts: &Options) {
                     ("files", datas.len() as f64),
                     ("rows", rows as f64),
                     ("styled_spans", spans as f64),
-                    (
-                        "styled_mb",
-                        (spans * span_size + vec_headers) as f64 / (1024.0 * 1024.0),
-                    ),
+                    ("styles", styles as f64),
+                    ("styled_mb", bytes as f64 / (1024.0 * 1024.0)),
                 ],
             });
         }
