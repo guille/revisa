@@ -120,9 +120,10 @@ impl LineIndex {
 
 /// Per-file computed diff data, cached after first load.
 pub struct FileDiffData {
-    pub old_lines: LineIndex,
-    pub new_lines: LineIndex,
-    pub aligned_rows: Vec<AlignedRow>,
+    // Arc-shared with `SearchableFileData` so search snapshots are cheap.
+    pub old_lines: Arc<LineIndex>,
+    pub new_lines: Arc<LineIndex>,
+    pub aligned_rows: Arc<Vec<AlignedRow>>,
     pub hunks: Vec<Hunk>,
     /// Pre-computed styled spans per aligned row, per side (left, right).
     /// Indexed by row index. Empty vec for padding rows.
@@ -185,9 +186,9 @@ impl FileDiffData {
         fold_rh: usize,
     ) -> Self {
         Self {
-            old_lines: LineIndex::empty(),
-            new_lines: LineIndex::empty(),
-            aligned_rows: vec![],
+            old_lines: Arc::new(LineIndex::empty()),
+            new_lines: Arc::new(LineIndex::empty()),
+            aligned_rows: Arc::new(vec![]),
             hunks: vec![],
             left_styled: vec![],
             right_styled: vec![],
@@ -199,9 +200,9 @@ impl FileDiffData {
 
     pub fn binary_placeholder(fold_ctx: usize, fold_exp: usize, fold_rh: usize) -> Self {
         Self {
-            old_lines: LineIndex::empty(),
-            new_lines: LineIndex::empty(),
-            aligned_rows: vec![],
+            old_lines: Arc::new(LineIndex::empty()),
+            new_lines: Arc::new(LineIndex::empty()),
+            aligned_rows: Arc::new(vec![]),
             hunks: vec![],
             left_styled: vec![],
             right_styled: vec![],
@@ -1208,9 +1209,9 @@ pub fn compute_diff_from_contents_with_diff(
     let fold_state = FoldState::new(aligned_rows.len(), &hunks, fold_ctx, fold_exp, fold_rh);
 
     FileDiffData {
-        old_lines: LineIndex::new(old_content),
-        new_lines: LineIndex::new(new_content),
-        aligned_rows,
+        old_lines: Arc::new(LineIndex::new(old_content)),
+        new_lines: Arc::new(LineIndex::new(new_content)),
+        aligned_rows: Arc::new(aligned_rows),
         hunks,
         left_styled,
         right_styled,
@@ -1474,9 +1475,9 @@ mod tests {
         s.diff_cache.insert(
             0,
             crate::app::FileDiffData {
-                old_lines: LineIndex::empty(),
-                new_lines: LineIndex::empty(),
-                aligned_rows: vec![],
+                old_lines: Arc::new(LineIndex::empty()),
+                new_lines: Arc::new(LineIndex::empty()),
+                aligned_rows: Arc::new(vec![]),
                 hunks: vec![],
                 left_styled: vec![],
                 right_styled: vec![],

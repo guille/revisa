@@ -401,18 +401,20 @@ impl SearchState {
 
 /// Lightweight snapshot of the data needed for search (avoids cloning styled spans, fold state, etc.).
 pub struct SearchableFileData {
-    pub aligned_rows: Vec<AlignedRow>,
-    pub old_lines: crate::app::LineIndex,
-    pub new_lines: crate::app::LineIndex,
+    pub aligned_rows: std::sync::Arc<Vec<AlignedRow>>,
+    pub old_lines: std::sync::Arc<crate::app::LineIndex>,
+    pub new_lines: std::sync::Arc<crate::app::LineIndex>,
     pub skip: bool,
 }
 
 impl SearchableFileData {
+    /// Snapshot a file for background searching. Content and rows are
+    /// Arc-shared with `FileDiffData`, so this is refcount bumps, not copies.
     pub fn from_diff_data(data: &FileDiffData) -> Self {
         Self {
-            aligned_rows: data.aligned_rows.clone(),
-            old_lines: data.old_lines.clone(),
-            new_lines: data.new_lines.clone(),
+            aligned_rows: std::sync::Arc::clone(&data.aligned_rows),
+            old_lines: std::sync::Arc::clone(&data.old_lines),
+            new_lines: std::sync::Arc::clone(&data.new_lines),
             skip: data.too_large_message.is_some() || data.binary,
         }
     }
@@ -429,6 +431,16 @@ pub fn compute_file_matches(
     }
 
     let query_lower: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+    // All-ASCII queries take a byte-window fast path on ASCII lines.
+    let query_ascii: Option<Vec<u8>> = query_lower
+        .iter()
+        .all(char::is_ascii)
+        .then(|| query_lower.iter().map(|&c| c as u8).collect());
+    let query = PreparedQuery {
+        lower: &query_lower,
+        ascii: query_ascii.as_deref(),
+    };
+    let mut scratch = LineScratch::default();
     let mut matches = Vec::new();
 
     for (data_row, row) in data.aligned_rows.iter().enumerate() {
@@ -440,7 +452,8 @@ pub fn compute_file_matches(
             } => {
                 find_in_line(
                     data.old_lines.line(*left_line),
-                    &query_lower,
+                    query,
+                    &mut scratch,
                     file_index,
                     data_row,
                     MatchSide::Left,
@@ -448,7 +461,8 @@ pub fn compute_file_matches(
                 );
                 find_in_line(
                     data.new_lines.line(*right_line),
-                    &query_lower,
+                    query,
+                    &mut scratch,
                     file_index,
                     data_row,
                     MatchSide::Right,
@@ -458,7 +472,8 @@ pub fn compute_file_matches(
             AlignedRow::LeftOnly { left_line } => {
                 find_in_line(
                     data.old_lines.line(*left_line),
-                    &query_lower,
+                    query,
+                    &mut scratch,
                     file_index,
                     data_row,
                     MatchSide::Left,
@@ -468,7 +483,8 @@ pub fn compute_file_matches(
             AlignedRow::RightOnly { right_line } => {
                 find_in_line(
                     data.new_lines.line(*right_line),
-                    &query_lower,
+                    query,
+                    &mut scratch,
                     file_index,
                     data_row,
                     MatchSide::Right,
@@ -481,35 +497,79 @@ pub fn compute_file_matches(
     matches
 }
 
-/// Case-insensitive substring search using char-based iteration.
-/// Produces correct byte ranges even for multi-byte UTF-8 characters.
+/// A lowercased query, with a byte form when it is all-ASCII.
+#[derive(Clone, Copy)]
+struct PreparedQuery<'a> {
+    lower: &'a [char],
+    ascii: Option<&'a [u8]>,
+}
+
+/// Reusable buffers for the char-based fallback path, avoiding per-line
+/// allocations when searching non-ASCII content.
+#[derive(Default)]
+struct LineScratch {
+    chars: Vec<(usize, char)>,
+    lower: Vec<char>,
+}
+
+/// Case-insensitive substring search.
+///
+/// ASCII lines with ASCII queries are matched on byte windows without any
+/// allocation; ASCII bytes never occur inside multi-byte UTF-8 sequences, so
+/// the resulting offsets are valid char boundaries. Everything else falls
+/// back to char-based iteration, which produces correct byte ranges even for
+/// multi-byte UTF-8 characters.
 fn find_in_line(
     line: &str,
-    query_lower: &[char],
+    query: PreparedQuery<'_>,
+    scratch: &mut LineScratch,
     file_index: usize,
     data_row: usize,
     side: MatchSide,
     out: &mut Vec<SearchMatch>,
 ) {
+    let query_lower = query.lower;
     if query_lower.is_empty() {
         return;
     }
 
-    let line_chars: Vec<(usize, char)> = line.char_indices().collect();
-    if line_chars.len() < query_lower.len() {
+    if let Some(q) = query.ascii
+        && line.is_ascii()
+    {
+        let bytes = line.as_bytes();
+        if bytes.len() < q.len() {
+            return;
+        }
+        for i in 0..=bytes.len() - q.len() {
+            if bytes[i..i + q.len()].eq_ignore_ascii_case(q) {
+                out.push(SearchMatch {
+                    file_index,
+                    data_row,
+                    side,
+                    byte_range: i..i + q.len(),
+                });
+            }
+        }
         return;
     }
 
+    scratch.chars.clear();
+    scratch.chars.extend(line.char_indices());
+    if scratch.chars.len() < query_lower.len() {
+        return;
+    }
+
+    scratch.lower.clear();
+    scratch.lower.extend(scratch.chars.iter().map(|&(_, c)| {
+        let mut lower = c.to_lowercase();
+        // For most characters, to_lowercase yields exactly one char.
+        // For the rare multi-char case (e.g., 'İ' -> 'i̇'), take just the first.
+        lower.next().unwrap_or(c)
+    }));
+
+    let line_chars = &scratch.chars;
+    let line_lower = &scratch.lower;
     let end = line_chars.len() - query_lower.len() + 1;
-    let line_lower: Vec<char> = line_chars
-        .iter()
-        .map(|&(_, c)| {
-            let mut lower = c.to_lowercase();
-            // For most characters, to_lowercase yields exactly one char.
-            // For the rare multi-char case (e.g., 'İ' -> 'i̇'), take just the first.
-            lower.next().unwrap_or(c)
-        })
-        .collect();
 
     for i in 0..end {
         if line_lower[i..i + query_lower.len()] == *query_lower {
@@ -546,9 +606,9 @@ mod tests {
     fn make_diff_data(old: Vec<&str>, new: Vec<&str>, rows: Vec<AlignedRow>) -> FileDiffData {
         let n = rows.len();
         FileDiffData {
-            old_lines: LineIndex::new(old.join("\n")),
-            new_lines: LineIndex::new(new.join("\n")),
-            aligned_rows: rows,
+            old_lines: std::sync::Arc::new(LineIndex::new(old.join("\n"))),
+            new_lines: std::sync::Arc::new(LineIndex::new(new.join("\n"))),
+            aligned_rows: std::sync::Arc::new(rows),
             hunks: Vec::new(),
             left_styled: vec![Vec::new(); n],
             right_styled: vec![Vec::new(); n],
@@ -893,5 +953,58 @@ mod tests {
         let files = state.files_with_matches();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0], (0, 2)); // File 0 has 2 matches.
+    }
+
+    /// Run `find_in_line` for a query, optionally suppressing the ASCII fast
+    /// path to force the char-based fallback.
+    fn line_matches(line: &str, query: &str, allow_ascii: bool) -> Vec<SearchMatch> {
+        let lower: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+        let ascii: Option<Vec<u8>> = (allow_ascii && lower.iter().all(char::is_ascii))
+            .then(|| lower.iter().map(|&c| c as u8).collect());
+        let prepared = PreparedQuery {
+            lower: &lower,
+            ascii: ascii.as_deref(),
+        };
+        let mut out = Vec::new();
+        let mut scratch = LineScratch::default();
+        find_in_line(
+            line,
+            prepared,
+            &mut scratch,
+            0,
+            0,
+            MatchSide::Left,
+            &mut out,
+        );
+        out
+    }
+
+    #[test]
+    fn test_ascii_fast_path_matches_char_path() {
+        let cases = [
+            ("Config CONFIG config", "config"),
+            ("aaaa", "aa"), // overlapping matches
+            ("Fn fn FN", "fn"),
+            ("no match here", "xyz"),
+            ("f", "fn"), // line shorter than query
+            ("edge", "edge"),
+            ("Kelvin \u{212A} sign", "k"), // non-ASCII line → char path both ways
+            ("größe Größe", "größe"),      // non-ASCII query → char path both ways
+        ];
+        for (line, query) in cases {
+            assert_eq!(
+                line_matches(line, query, true),
+                line_matches(line, query, false),
+                "fast path diverges for {line:?} / {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ascii_fast_path_ranges() {
+        let matches = line_matches("Config x config", "config", true);
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].byte_range, 0..6);
+        assert_eq!(matches[1].byte_range, 9..15);
     }
 }
