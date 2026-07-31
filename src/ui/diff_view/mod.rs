@@ -22,6 +22,9 @@ const GUTTER_TEXT_RIGHT_PAD: f32 = 10.0;
 const ICON_SCALE: f32 = 1.4;
 /// Total gutter width in unified mode (two number columns + two thin separators).
 const UNIFIED_GUTTER_WIDTH: f32 = GUTTER_WIDTH * 2.0 + 2.0;
+/// Minimum text columns per panel for side-by-side to be worth it
+/// when `default_diff_mode = "auto"`.
+const AUTO_MODE_MIN_COLUMNS: f32 = 80.0;
 /// Brightness deltas for fold-bar hover effect (added to bg_fold RGB channels).
 const FOLD_HOVER_DR: u8 = 0x08;
 const FOLD_HOVER_DG: u8 = 0x0B;
@@ -122,6 +125,18 @@ impl DiffViewCtx {
             },
             synthetic_bold_italic: !fv.has_bold_italic && fv.has_bold,
         }
+    }
+}
+
+/// Resolve `default_diff_mode = "auto"`: side-by-side when two panels of
+/// `AUTO_MODE_MIN_COLUMNS` text columns fit in `diff_width`, unified otherwise.
+pub fn resolve_auto_mode(ctx: &egui::Context, font_size: f32, diff_width: f32) -> DiffMode {
+    let char_w = ctx.fonts_mut(|f| f.glyph_width(&egui::FontId::monospace(font_size), 'M'));
+    let needed = 2.0 * (GUTTER_WIDTH + AUTO_MODE_MIN_COLUMNS * char_w + TEXT_RIGHT_PAD) + 1.0;
+    if diff_width < needed {
+        DiffMode::Unified
+    } else {
+        DiffMode::SideBySide
     }
 }
 

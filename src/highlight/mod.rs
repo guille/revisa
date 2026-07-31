@@ -130,10 +130,12 @@ impl StyledRows {
         }
     }
 
+    #[cfg(any(test, feature = "dev-tools"))]
     pub fn span_count(&self) -> usize {
         self.spans.len()
     }
 
+    #[cfg(any(test, feature = "dev-tools"))]
     pub fn row_count(&self) -> usize {
         self.row_offsets.len().saturating_sub(1)
     }

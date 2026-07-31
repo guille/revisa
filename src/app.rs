@@ -330,6 +330,9 @@ pub struct AppState {
     pub cached_total_deleted: usize,
     /// Current diff display mode (side-by-side or unified).
     pub diff_mode: crate::domain::fold::DiffMode,
+    /// One-shot: `default_diff_mode = "auto"` awaits resolution on the first
+    /// rendered frame (once window geometry is trustworthy).
+    pub auto_diff_mode_pending: bool,
     /// Review-complete popup state.
     pub review_complete: ReviewCompletePopup,
     /// Search state for Ctrl+F find-in-diff.
@@ -409,7 +412,13 @@ impl AppState {
             cached_reviewed_count: 0,
             cached_total_added: total_added,
             cached_total_deleted: total_deleted,
-            diff_mode: settings.behavior.default_diff_mode,
+            diff_mode: match settings.behavior.default_diff_mode {
+                crate::domain::settings::DiffModePreference::Unified => DiffMode::Unified,
+                // Auto starts side-by-side provisionally; resolved before first render.
+                _ => DiffMode::SideBySide,
+            },
+            auto_diff_mode_pending: settings.behavior.default_diff_mode
+                == crate::domain::settings::DiffModePreference::Auto,
             review_complete: ReviewCompletePopup::default(),
             highlighter,
             settings,

@@ -438,6 +438,20 @@ impl eframe::App for RevisaApp {
         };
         let sidebar_default = ctx.content_rect().width() * sidebar_pct / 100.0;
 
+        // Resolve default_diff_mode = "auto" on the first rendered frame, once
+        // window geometry is trustworthy (post ppi-stabilization).
+        if self.state.auto_diff_mode_pending {
+            self.state.auto_diff_mode_pending = false;
+            let sidebar_w = if self.state.sidebar_visible {
+                sidebar_default.clamp(ui::file_list::SIDEBAR_MIN_WIDTH, sidebar_max)
+            } else {
+                0.0
+            };
+            let diff_width = ctx.content_rect().width() - sidebar_w;
+            self.state.diff_mode =
+                ui::diff_view::resolve_auto_mode(&ctx, self.state.settings.font.size, diff_width);
+        }
+
         // Drain background diff computation results.
         self.state.poll_background();
 

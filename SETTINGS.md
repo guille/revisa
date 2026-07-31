@@ -50,7 +50,7 @@ All colors are hex strings in `"#RRGGBB"` or `"#RRGGBBAA"` format. The alpha cha
 | `line_height`          | float  | `1.5`  | Line height as a multiplier of `font.size`. The actual pixel height is `font.size × line_height`. Must be at least `1.0`. |
 | `fold_row_height`      | int    | `2`     | Number of `line_height` units each fold separator occupies. `1` = compact, `2` = standard, `3` = spacious. Must be at least `1`. |
 | `editor`               | string | `""`    | Editor command for "open in editor" (Ctrl+O). When empty, falls back to `$VISUAL` then `$EDITOR`. May include arguments. |
-| `default_diff_mode`    | string | `"side-by-side"` | Default diff view mode. Accepts `"side-by-side"` or `"unified"`. |
+| `default_diff_mode`    | string | `"side-by-side"` | Default diff view mode. Accepts `"side-by-side"`, `"unified"` or `"auto"`. With `"auto"` the mode is picked once at startup based on window width: side-by-side when two 80-column panels fit, unified otherwise. |
 | `max_diff_lines`       | int    | `4000`  | Maximum lines per file before showing a "too large" placeholder. Files above this limit can still be computed on demand via the "Calculate anyway" button. Set to `0` to disable the limit (all files computed regardless of size). |
 
 ## `[keybinds]`

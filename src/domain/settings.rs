@@ -98,6 +98,15 @@ pub struct ColorSettings {
     pub bg_search_match_current: Rgba,
 }
 
+/// Configured default diff mode: a concrete mode, or `Auto` (resolved from
+/// window width once, on the first rendered frame).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffModePreference {
+    SideBySide,
+    Unified,
+    Auto,
+}
+
 #[derive(Debug, Clone)]
 pub struct BehaviorSettings {
     pub use_nerdfont_icons: bool,
@@ -109,8 +118,8 @@ pub struct BehaviorSettings {
     pub fold_row_height: usize,
     /// Editor command for "open in editor". Falls back to $VISUAL, then $EDITOR.
     pub editor: Option<String>,
-    /// Default diff view mode: "side-by-side" or "unified".
-    pub default_diff_mode: crate::domain::fold::DiffMode,
+    /// Default diff view mode: "side-by-side", "unified" or "auto".
+    pub default_diff_mode: DiffModePreference,
     /// Maximum lines per file before showing "too large" placeholder. 0 = no limit.
     pub max_diff_lines: usize,
 }
@@ -409,7 +418,7 @@ impl Default for BehaviorSettings {
             line_height: (14.0 * DEFAULT_LINE_HEIGHT_MULT).round(), // Must match FontSettings default size
             fold_row_height: 2,
             editor: None,
-            default_diff_mode: crate::domain::fold::DiffMode::SideBySide,
+            default_diff_mode: DiffModePreference::Auto,
             max_diff_lines: 4_000,
         }
     }
@@ -946,10 +955,11 @@ impl Settings {
             fold_row_height,
             editor: raw.behavior.editor.filter(|s| !s.is_empty()),
             default_diff_mode: match raw.behavior.default_diff_mode.as_deref() {
-                Some("unified") => crate::domain::fold::DiffMode::Unified,
-                Some("side-by-side") | None => crate::domain::fold::DiffMode::SideBySide,
+                Some("unified") => DiffModePreference::Unified,
+                Some("auto") | None => DiffModePreference::Auto,
+                Some("side-by-side") => DiffModePreference::SideBySide,
                 Some(other) => {
-                    errors.push(format!("behavior.default_diff_mode: unknown mode '{other}', expected 'side-by-side' or 'unified'"));
+                    errors.push(format!("behavior.default_diff_mode: unknown mode '{other}', expected 'side-by-side', 'unified' or 'auto'"));
                     defaults.behavior.default_diff_mode
                 }
             },
@@ -1153,6 +1163,27 @@ fold_context = 3
         assert_eq!(s.font.face, "monospace"); // default kept
         assert_eq!(s.behavior.fold_context, 3);
         assert_eq!(s.behavior.fold_expand_step, 20); // default kept
+    }
+
+    #[test]
+    fn test_default_diff_mode_parsing() {
+        let toml = r#"
+[behavior]
+default_diff_mode = "side-by-side"
+"#;
+        let s = Settings::parse(toml).unwrap();
+        assert_eq!(s.behavior.default_diff_mode, DiffModePreference::SideBySide);
+
+        let s = Settings::parse("").unwrap();
+        assert_eq!(s.behavior.default_diff_mode, DiffModePreference::Auto);
+
+        let toml = r#"
+[behavior]
+default_diff_mode = "vertical"
+"#;
+        let err = Settings::parse(toml).unwrap_err();
+        assert!(err.contains("behavior.default_diff_mode"));
+        assert!(err.contains("'auto'"));
     }
 
     #[test]
