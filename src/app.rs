@@ -288,6 +288,9 @@ pub struct AppState {
     pub settings: crate::domain::settings::Settings,
     /// Cached diff view rendering context (derived from settings, computed once).
     pub diff_view_ctx: crate::ui::diff_view::DiffViewCtx,
+    /// Cross-frame cache of shaped line galleys; invalidated per file on diff
+    /// recompute and wholesale on display-scale changes.
+    pub galley_cache: std::cell::RefCell<crate::ui::diff_view::GalleyCache>,
     /// Timestamp when the path was last copied to clipboard (for feedback indicator).
     pub copied_at: Option<std::time::Instant>,
     /// Deferred clipboard copy (set by keybind handler, consumed by UI).
@@ -375,6 +378,7 @@ impl AppState {
             bg_results,
             files_computed,
             diff_view_ctx,
+            galley_cache: std::cell::RefCell::new(crate::ui::diff_view::GalleyCache::default()),
             copied_at: None,
             pending_copy_path: None,
             pending_open_picker: false,
@@ -595,6 +599,7 @@ impl AppState {
             // Don't cache results for excluded files.
             if !self.is_file_excluded(idx) {
                 self.diff_cache.insert(idx, data);
+                self.galley_cache.borrow_mut().invalidate_file(idx);
             }
         }
 
@@ -605,6 +610,7 @@ impl AppState {
                     had_new = true;
                     self.force_computing.remove(idx);
                     self.diff_cache.insert(*idx, data);
+                    self.galley_cache.borrow_mut().invalidate_file(*idx);
                     false // receiver consumed, remove
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => true, // still pending

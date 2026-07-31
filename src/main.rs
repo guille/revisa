@@ -381,6 +381,8 @@ impl eframe::App for RevisaApp {
             Some(ppi) if (self.state.last_ppi - ppi).abs() > f32::EPSILON => {
                 self.state.last_ppi = ppi;
                 self.state.ppi_stable_frames = 0;
+                // Shaped galleys embed glyph metrics for the old scale.
+                self.state.galley_cache.borrow_mut().clear();
                 ctx.data_mut(|d| {
                     d.remove::<eframe::egui::containers::panel::PanelState>(eframe::egui::Id::new(
                         "file_list",

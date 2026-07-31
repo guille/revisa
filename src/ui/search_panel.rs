@@ -407,6 +407,7 @@ pub fn navigate_to_match(state: &mut AppState, m: &crate::domain::search::Search
             )
         };
         state.diff_cache.insert(idx, data);
+        state.galley_cache.borrow_mut().invalidate_file(idx);
         state.files_computed += 1;
     }
 

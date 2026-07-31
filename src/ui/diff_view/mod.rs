@@ -162,6 +162,8 @@ fn show_inner(ui: &mut egui::Ui, state: &mut AppState, handle_input_enabled: boo
     let vctx = state.diff_view_ctx.clone();
     let line_height = vctx.line_height;
 
+    state.galley_cache.borrow_mut().begin_frame();
+
     // If diff data isn't cached yet, show a loading indicator but still handle file navigation.
     if !state.diff_cache.contains_key(&state.selected_file) {
         if handle_input_enabled {
@@ -353,6 +355,8 @@ fn show_inner(ui: &mut egui::Ui, state: &mut AppState, handle_input_enabled: boo
                             search_render_map,
                             current_search_match: current_search_match.clone(),
                             search_colors,
+                            galleys: &state.galley_cache,
+                            file_idx: selected,
                         },
                         panel_width,
                         separator_width,
@@ -371,6 +375,8 @@ fn show_inner(ui: &mut egui::Ui, state: &mut AppState, handle_input_enabled: boo
                         search_render_map,
                         current_search_match,
                         search_colors,
+                        galleys: &state.galley_cache,
+                        file_idx: selected,
                     },
                     full_width,
                 ),
@@ -637,7 +643,7 @@ fn render_h_scrollbar(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum PanelSide {
     Left,
     Right,
@@ -659,6 +665,57 @@ struct ContentRenderParams<'a> {
     pub(super) current_search_match: Option<crate::domain::search::SearchMatch>,
     /// Search highlight colors: (other_match, current_match).
     pub(super) search_colors: (egui::Color32, egui::Color32),
+    /// Cross-frame galley cache.
+    pub(super) galleys: &'a std::cell::RefCell<GalleyCache>,
+    /// Index of the rendered file (galley cache key component).
+    pub(super) file_idx: usize,
+}
+
+/// Cross-frame cache of shaped line galleys, keyed by (file, data_row, side).
+///
+/// Line text and spans are immutable per `FileDiffData`, so a row's galley
+/// only changes when its diff is recomputed or the display scale changes —
+/// yet without this cache every visible row rebuilds and re-hashes a
+/// `LayoutJob` every frame. Entries not touched for a couple of frames are
+/// evicted, keeping the cache at roughly the visible-row count.
+#[derive(Default)]
+pub struct GalleyCache {
+    map: std::collections::HashMap<(usize, usize, PanelSide), (std::sync::Arc<egui::Galley>, u64)>,
+    frame: u64,
+}
+
+/// Frames an entry may go untouched before eviction.
+const GALLEY_CACHE_KEEP_FRAMES: u64 = 2;
+
+impl GalleyCache {
+    /// Advance the frame counter and evict stale entries. Call once per frame.
+    pub fn begin_frame(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+        let frame = self.frame;
+        self.map
+            .retain(|_, (_, stamp)| frame.wrapping_sub(*stamp) <= GALLEY_CACHE_KEEP_FRAMES);
+    }
+
+    fn get_or_insert(
+        &mut self,
+        key: (usize, usize, PanelSide),
+        build: impl FnOnce() -> std::sync::Arc<egui::Galley>,
+    ) -> std::sync::Arc<egui::Galley> {
+        let frame = self.frame;
+        let (galley, stamp) = self.map.entry(key).or_insert_with(|| (build(), frame));
+        *stamp = frame;
+        std::sync::Arc::clone(galley)
+    }
+
+    /// Drop cached galleys for one file (its diff data was replaced).
+    pub fn invalidate_file(&mut self, file_idx: usize) {
+        self.map.retain(|(f, _, _), _| *f != file_idx);
+    }
+
+    /// Drop everything (display scale or fonts changed).
+    pub fn clear(&mut self) {
+        self.map.clear();
+    }
 }
 
 /// Shared painter/position parameters for row rendering functions.
@@ -669,6 +726,8 @@ struct RowRenderCtx<'a> {
     pub(super) y: f32,
     pub(super) scroll_x: f32,
     pub(super) vctx: &'a DiffViewCtx,
+    pub(super) galleys: &'a std::cell::RefCell<GalleyCache>,
+    pub(super) file_idx: usize,
 }
 
 /// Shared parameters for fold row rendering.
@@ -712,6 +771,8 @@ fn render_diff_content(
         search_render_map,
         current_search_match,
         search_colors,
+        galleys,
+        file_idx,
     } = params;
     let (scroll_start, scroll_end, scroll_x, scroll_y_offset) =
         (*scroll_start, *scroll_end, *scroll_x, *scroll_y_offset);
@@ -809,6 +870,8 @@ fn render_diff_content(
                             y,
                             scroll_x,
                             vctx,
+                            galleys,
+                            file_idx: *file_idx,
                         },
                         data,
                         row,
@@ -829,6 +892,8 @@ fn render_diff_content(
                             y,
                             scroll_x,
                             vctx,
+                            galleys,
+                            file_idx: *file_idx,
                         },
                         data,
                         row,
@@ -888,6 +953,8 @@ fn render_diff_content_unified(
         search_render_map,
         current_search_match,
         search_colors,
+        galleys,
+        file_idx,
     } = params;
     let (scroll_start, scroll_end, scroll_x, scroll_y_offset) =
         (*scroll_start, *scroll_end, *scroll_x, *scroll_y_offset);
@@ -997,6 +1064,8 @@ fn render_diff_content_unified(
                                     y,
                                     scroll_x,
                                     vctx,
+                                    galleys,
+                                    file_idx: *file_idx,
                                 },
                                 data,
                                 row,
@@ -1029,6 +1098,8 @@ fn render_diff_content_unified(
                                 y,
                                 scroll_x,
                                 vctx,
+                                galleys,
+                                file_idx: *file_idx,
                             },
                             data,
                             row,
@@ -1157,6 +1228,8 @@ fn render_unified_data_row(
         y,
         scroll_x,
         vctx,
+        galleys,
+        file_idx,
     } = rctx;
     let (left_x, y, scroll_x) = (*left_x, *y, *scroll_x);
     let line_height = vctx.line_height;
@@ -1254,23 +1327,29 @@ fn render_unified_data_row(
 
     // Draw syntax-highlighted text.
     // Choose the correct styled spans and line text based on sub-row.
-    let (styled, line_text) = match (sub, row) {
+    let (styled, line_text, cache_side) = match (sub, row) {
         (UnifiedSubRow::New, AlignedRow::Both { right_line, .. })
         | (_, AlignedRow::RightOnly { right_line }) => (
             data.right_styled.row(data_idx),
             data.new_lines.line(*right_line),
+            PanelSide::Right,
         ),
         (_, AlignedRow::Both { left_line, .. } | AlignedRow::LeftOnly { left_line }) => (
             data.left_styled.row(data_idx),
             data.old_lines.line(*left_line),
+            PanelSide::Left,
         ),
     };
 
     if styled.is_empty() {
         0.0
     } else {
-        let layout_job = build_layout_job(line_text, styled, &data.styles, vctx.font_size, vctx);
-        let galley = text_painter.layout_job(layout_job);
+        let galley = galleys
+            .borrow_mut()
+            .get_or_insert((*file_idx, data_idx, cache_side), || {
+                let job = build_layout_job(line_text, styled, &data.styles, vctx.font_size, vctx);
+                text_painter.layout_job(job)
+            });
         let width = galley.size().x;
         let text_pos = egui::pos2(
             left_x + UNIFIED_GUTTER_WIDTH - scroll_x,
@@ -1327,6 +1406,8 @@ fn render_data_row(
         y,
         scroll_x,
         vctx,
+        galleys,
+        file_idx,
     } = rctx;
     let (left_x, y, scroll_x) = (*left_x, *y, *scroll_x);
     let line_height = vctx.line_height;
@@ -1429,8 +1510,12 @@ fn render_data_row(
             ) => data.new_lines.line(*right_line),
             _ => "",
         };
-        let layout_job = build_layout_job(line_text, styled, &data.styles, vctx.font_size, vctx);
-        let galley = text_painter.layout_job(layout_job);
+        let galley = galleys
+            .borrow_mut()
+            .get_or_insert((*file_idx, data_idx, side), || {
+                let job = build_layout_job(line_text, styled, &data.styles, vctx.font_size, vctx);
+                text_painter.layout_job(job)
+            });
         let width = galley.size().x;
         let text_pos = egui::pos2(left_x + GUTTER_WIDTH - scroll_x, y + vctx.text_y_offset);
 
