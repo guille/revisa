@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -147,12 +147,17 @@ pub fn walk_and_pair(
 /// Files larger than this are skipped to avoid expensive diff operations.
 const RENAME_MAX_LINES: usize = 10_000;
 
+/// Number of full line diffs run by rename detection (bench instrumentation).
+#[cfg(feature = "dev-tools")]
+pub static RENAME_DIFFS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Detect renames among Deleted/Added pairs by content similarity.
 ///
-/// Computes a similarity score for every (deleted, added) pair, then greedily
-/// assigns matches from highest similarity downward. Uses rayon for parallel
-/// similarity computation. Binary files (non-UTF-8) and files exceeding
-/// `RENAME_MAX_LINES` are skipped.
+/// Exact matches are resolved first via a content map in O(D + A). Remaining
+/// candidate pairs are pruned with `similarity_upper_bound` (lossless: derived
+/// from line counts alone), scored with a full line diff in parallel, then
+/// greedily assigned from highest similarity downward. Binary files (non-UTF-8)
+/// and files exceeding `RENAME_MAX_LINES` are skipped.
 fn detect_renames(pairs: &mut Vec<FilePair>, threshold: u8) {
     use rayon::prelude::*;
 
@@ -175,39 +180,90 @@ fn detect_renames(pairs: &mut Vec<FilePair>, threshold: u8) {
     }
 
     // Read file contents using stored absolute paths. Binary files yield None.
-    let read_content = |pair: &FilePair, is_left: bool| -> Option<String> {
+    let read_content = |pair: &FilePair, is_left: bool| -> Option<(String, usize)> {
         let path = if is_left {
             pair.left_path.as_ref()?
         } else {
             pair.right_path.as_ref()?
         };
         let text = fs::read_to_string(path).ok()?;
+        let lines = text.lines().count();
         // Skip files that are too large for efficient diffing.
-        if text.lines().count() > RENAME_MAX_LINES {
+        if lines > RENAME_MAX_LINES {
             return None;
         }
-        Some(text)
+        Some((text, lines))
     };
 
-    let deleted_contents: Vec<Option<String>> = deleted_indices
+    let deleted_contents: Vec<Option<(String, usize)>> = deleted_indices
         .iter()
         .map(|&i| read_content(&pairs[i], true))
         .collect();
-    let added_contents: Vec<Option<String>> = added_indices
+    let added_contents: Vec<Option<(String, usize)>> = added_indices
         .iter()
         .map(|&i| read_content(&pairs[i], false))
         .collect();
 
-    // Build all candidate pairs and compute similarity in parallel.
-    let candidate_pairs: Vec<(usize, usize)> = (0..deleted_indices.len())
-        .flat_map(|di| (0..added_indices.len()).map(move |ai| (di, ai)))
-        .collect();
+    let mut matched_del = vec![false; deleted_indices.len()];
+    let mut matched_add = vec![false; added_indices.len()];
+    let mut renames: Vec<(usize, usize, u8)> = Vec::new();
+
+    // Exact-content fast path: matches identical files without any diffing.
+    let mut by_content: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (di, content) in deleted_contents.iter().enumerate() {
+        if let Some((text, _)) = content {
+            by_content.entry(text.as_str()).or_default().push(di);
+        }
+    }
+    for (ai, content) in added_contents.iter().enumerate() {
+        let Some((text, _)) = content else { continue };
+        if let Some(unmatched) = by_content.get_mut(text.as_str())
+            && let Some(di) = unmatched.pop()
+        {
+            matched_del[di] = true;
+            matched_add[ai] = true;
+            renames.push((deleted_indices[di], added_indices[ai], 100));
+        }
+    }
+
+    // Pairwise scoring for the rest, skipping pairs whose similarity is
+    // provably below the threshold: first by line counts alone (O(1)), then
+    // by line-hash multiset intersection (O(a + b), vs a full diff).
+    let hashes_for = |contents: &[Option<(String, usize)>], matched: &[bool]| {
+        contents
+            .iter()
+            .enumerate()
+            .map(|(i, c)| match c {
+                Some((text, _)) if !matched[i] => Some(line_hashes(text)),
+                _ => None,
+            })
+            .collect::<Vec<Option<Vec<u64>>>>()
+    };
+    let deleted_hashes = hashes_for(&deleted_contents, &matched_del);
+    let added_hashes = hashes_for(&added_contents, &matched_add);
+
+    let mut candidate_pairs: Vec<(usize, usize)> = Vec::new();
+    for (di, del) in deleted_hashes.iter().enumerate() {
+        let Some(del_hashes) = del else { continue };
+        for (ai, add) in added_hashes.iter().enumerate() {
+            let Some(add_hashes) = add else { continue };
+            if similarity_upper_bound(del_hashes.len(), add_hashes.len()) < threshold {
+                continue;
+            }
+            let common = sorted_intersection_count(del_hashes, add_hashes);
+            if similarity_from_matches(common, del_hashes.len() + add_hashes.len()) >= threshold {
+                candidate_pairs.push((di, ai));
+            }
+        }
+    }
 
     let mut candidates: Vec<(usize, usize, u8)> = candidate_pairs
         .par_iter()
         .filter_map(|&(di, ai)| {
-            let del_text = deleted_contents[di].as_deref()?;
-            let add_text = added_contents[ai].as_deref()?;
+            let (del_text, _) = deleted_contents[di].as_ref()?;
+            let (add_text, _) = added_contents[ai].as_ref()?;
+            #[cfg(feature = "dev-tools")]
+            RENAME_DIFFS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let sim = line_similarity(del_text, add_text);
             if sim >= threshold {
                 Some((di, ai, sim))
@@ -221,10 +277,6 @@ fn detect_renames(pairs: &mut Vec<FilePair>, threshold: u8) {
     candidates.sort_unstable_by_key(|b| std::cmp::Reverse(b.2));
 
     // Greedily assign matches: highest similarity wins.
-    let mut matched_del = vec![false; deleted_indices.len()];
-    let mut matched_add = vec![false; added_indices.len()];
-    let mut renames: Vec<(usize, usize, u8)> = Vec::new();
-
     for (di, ai, sim) in candidates {
         if matched_del[di] || matched_add[ai] {
             continue;
@@ -259,11 +311,55 @@ fn detect_renames(pairs: &mut Vec<FilePair>, threshold: u8) {
         remove_indices.push(*add_idx);
     }
 
-    // Remove the added entries that were merged (in reverse order to preserve indices).
-    remove_indices.sort_unstable();
-    for idx in remove_indices.into_iter().rev() {
-        pairs.remove(idx);
+    // Remove the added entries that were merged.
+    let remove: HashSet<usize> = remove_indices.into_iter().collect();
+    let mut idx = 0;
+    pairs.retain(|_| {
+        let keep = !remove.contains(&idx);
+        idx += 1;
+        keep
+    });
+}
+
+/// Upper bound on `line_similarity` from line counts alone:
+/// equal lines cannot exceed the smaller file.
+fn similarity_upper_bound(a_lines: usize, b_lines: usize) -> u8 {
+    similarity_from_matches(a_lines.min(b_lines), a_lines + b_lines)
+}
+
+/// Sorted hashes of a text's lines, for cheap similarity upper bounds.
+/// Hashing strips line endings; collisions and CRLF folding can only
+/// overcount matches, so bounds derived from these stay upper bounds.
+fn line_hashes(text: &str) -> Vec<u64> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hashes: Vec<u64> = text
+        .lines()
+        .map(|line| {
+            let mut h = DefaultHasher::new();
+            line.hash(&mut h);
+            h.finish()
+        })
+        .collect();
+    hashes.sort_unstable();
+    hashes
+}
+
+/// Multiset intersection size of two sorted slices. Diff-equal lines cannot
+/// exceed this, making it an upper bound on `line_similarity` matches.
+fn sorted_intersection_count(a: &[u64], b: &[u64]) -> usize {
+    let (mut i, mut j, mut count) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                count += 1;
+                i += 1;
+                j += 1;
+            }
+        }
     }
+    count
 }
 
 /// Compute line-level similarity between two text contents as a percentage (0–100).
@@ -271,12 +367,7 @@ fn detect_renames(pairs: &mut Vec<FilePair>, threshold: u8) {
 /// Uses `similar::TextDiff` to count matching lines, then computes
 /// `2 * matches / (lines_a + lines_b) * 100`.
 fn line_similarity(a: &str, b: &str) -> u8 {
-    let a_lines = a.lines().count();
-    let b_lines = b.lines().count();
-    let max_lines = a_lines + b_lines;
-    if max_lines == 0 {
-        return 100; // both empty = identical
-    }
+    let total_lines = a.lines().count() + b.lines().count();
 
     let diff = similar::TextDiff::configure()
         .algorithm(similar::Algorithm::Myers)
@@ -289,8 +380,16 @@ fn line_similarity(a: &str, b: &str) -> u8 {
         }
     }
 
-    let similarity = (2 * matches * 100) / max_lines;
-    similarity.min(100) as u8
+    similarity_from_matches(matches, total_lines)
+}
+
+/// Similarity percentage from a matching-line count: `2 * matches * 100 / total`.
+/// Both empty (total 0) counts as identical.
+fn similarity_from_matches(matches: usize, total_lines: usize) -> u8 {
+    if total_lines == 0 {
+        return 100;
+    }
+    ((2 * matches * 100) / total_lines).min(100) as u8
 }
 
 /// Recursively collect all file paths relative to `root`.
@@ -660,6 +759,96 @@ mod tests {
     #[test]
     fn test_line_similarity_completely_different() {
         assert_eq!(line_similarity("a\nb\nc", "x\ny\nz"), 0);
+    }
+
+    #[test]
+    fn test_similarity_upper_bound_edges() {
+        assert_eq!(similarity_upper_bound(0, 0), 100);
+        assert_eq!(similarity_upper_bound(10, 10), 100);
+        assert_eq!(similarity_upper_bound(0, 5), 0);
+        assert_eq!(similarity_upper_bound(1, 3), 50);
+        assert_eq!(similarity_upper_bound(40, 250), 27);
+    }
+
+    #[test]
+    fn test_similarity_upper_bounds_chain() {
+        // count bound >= intersection bound >= actual similarity.
+        let samples = [
+            ("a\nb\nc", "a\nb\nc"),
+            ("a\nb\nc", "x\ny\nz"),
+            ("a\nb", "a\nb\nc\nd\ne\nf"),
+            ("", "a\nb"),
+            ("a\nb\nc\nd", "b\nc"),
+            ("b\na\nc", "a\nb\nc"),
+            ("a\na\na", "a\nx\na"),
+            ("a\r\nb", "a\nb"),
+        ];
+        for (a, b) in samples {
+            let (ha, hb) = (line_hashes(a), line_hashes(b));
+            let count_bound = similarity_upper_bound(ha.len(), hb.len());
+            let intersection_bound =
+                similarity_from_matches(sorted_intersection_count(&ha, &hb), ha.len() + hb.len());
+            let actual = line_similarity(a, b);
+            assert!(
+                count_bound >= intersection_bound && intersection_bound >= actual,
+                "bound chain violated for {a:?} vs {b:?}: \
+                 {count_bound} >= {intersection_bound} >= {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sorted_intersection_count_multiset() {
+        assert_eq!(sorted_intersection_count(&[1, 1, 2, 3], &[1, 2, 2, 4]), 2);
+        assert_eq!(sorted_intersection_count(&[], &[1, 2]), 0);
+        assert_eq!(sorted_intersection_count(&[5, 5, 5], &[5, 5, 5]), 3);
+    }
+
+    #[test]
+    fn test_rename_duplicate_identical_contents() {
+        // Two identical deleted files, one identical added file: exactly one
+        // rename; the other stays deleted.
+        let content = "line one\nline two\nline three\n";
+        let (left, right) = setup_dirs(
+            &[("dup_a.txt", content), ("dup_b.txt", content)],
+            &[("moved.txt", content)],
+        );
+        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        assert_eq!(pairs.len(), 2);
+        let renamed: Vec<_> = pairs
+            .iter()
+            .filter(|p| matches!(p.kind, FileChangeKind::Renamed { .. }))
+            .collect();
+        assert_eq!(renamed.len(), 1);
+        assert_eq!(renamed[0].kind, FileChangeKind::Renamed { similarity: 100 });
+        assert_eq!(renamed[0].relative_path, PathBuf::from("moved.txt"));
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|p| p.kind == FileChangeKind::Deleted)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_rename_size_mismatch_not_matched() {
+        // The small deleted file's lines all appear in the large added file,
+        // but line counts alone cap similarity far below the threshold.
+        let small = "a\nb\n";
+        let mut large = String::from("a\nb\n");
+        for i in 0..40 {
+            use std::fmt::Write;
+            let _ = writeln!(large, "l{i}");
+        }
+        let (left, right) = setup_dirs(&[("small.txt", small)], &[("large.txt", &large)]);
+        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert!(
+            pairs
+                .iter()
+                .all(|p| !matches!(p.kind, FileChangeKind::Renamed { .. }))
+        );
     }
 
     #[test]

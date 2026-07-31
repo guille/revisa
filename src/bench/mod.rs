@@ -87,14 +87,22 @@ pub fn run(opts: &Options) {
     let mut results: Vec<StageResult> = Vec::new();
 
     // walk: directory scan + pairing + rename detection.
+    file_pair::RENAME_DIFFS.store(0, std::sync::atomic::Ordering::Relaxed);
     let (pairs, wall) = timed(iters("walk"), || {
         file_pair::walk_and_pair(&corpus.left, &corpus.right, false).unwrap_or_else(|e| {
             eprintln!("Error scanning corpus: {e}");
             std::process::exit(1);
         })
     });
+    let pairs_diffed =
+        file_pair::RENAME_DIFFS.load(std::sync::atomic::Ordering::Relaxed) / iters("walk").max(1);
     if want("walk") {
-        results.push(walk_result(&pairs, corpus.renames.as_deref(), wall));
+        results.push(walk_result(
+            &pairs,
+            corpus.renames.as_deref(),
+            pairs_diffed,
+            wall,
+        ));
     }
 
     // read-diff: read contents + Myers line diff, sequential (phase-1 cost
@@ -370,7 +378,12 @@ pub fn run(opts: &Options) {
     report(&results, opts.json);
 }
 
-fn walk_result(pairs: &[FilePair], truth: Option<&[(PathBuf, PathBuf)]>, wall: f64) -> StageResult {
+fn walk_result(
+    pairs: &[FilePair],
+    truth: Option<&[(PathBuf, PathBuf)]>,
+    pairs_diffed: usize,
+    wall: f64,
+) -> StageResult {
     let renamed: Vec<(&PathBuf, &PathBuf)> = pairs
         .iter()
         .filter(|p| matches!(p.kind, FileChangeKind::Renamed { .. }))
@@ -393,6 +406,7 @@ fn walk_result(pairs: &[FilePair], truth: Option<&[(PathBuf, PathBuf)]>, wall: f
         ("deleted", d0 as f64),
         ("added", a0 as f64),
         ("candidates", (d0 * a0) as f64),
+        ("pairs_diffed", pairs_diffed as f64),
         ("renames", renamed.len() as f64),
     ];
     if let Some(truth) = truth {
