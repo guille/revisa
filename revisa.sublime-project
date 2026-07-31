@@ -7,5 +7,16 @@
 				"//assets/bundled_syntaxes/*"
 			]
 		}
-	]
+	],
+	"settings": {
+		"LSP": {
+			"tombi": {
+				"disabled_capabilities": {
+					"semanticTokensProvider": true,
+					// Breaks Cargo.toml for some reason
+					"documentFormattingProvider": true,
+				}
+			}
+		}
+	}
 }
