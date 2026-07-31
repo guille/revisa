@@ -1,8 +1,8 @@
-We are building a git PR review tool: **revisa**. It targets Linux only and runs as a native GUI app using egui/eframe.
+**revisa** is a directory diff review tool, mostly meant to be used as a git difftool. It targets Linux only and runs as a native GUI app using egui/eframe.
 
 ## Current State
 
-The project is feature-complete for v1. All core features are implemented and working:
+All core features are implemented and working:
 
 - **Side-by-side diff view** with scroll-synced old/new panels, syntax highlighting, and inline word-level diff highlighting
 - **Unified (stacked) diff view** toggled with Ctrl+M, with dual gutter (old/new line numbers)
@@ -59,6 +59,7 @@ src/
 - Avoid unnecessary dependency bloat — use dependencies for core concerns, implement trivial functions instead of pulling in crates
 - Test coverage: domain logic must be well tested
 - Code quality: run "mise run lint" after changes and fix issues to improve quality
+- When doing performance work, read BENCH.md to review the current setup.
 
 ## Build System
 
