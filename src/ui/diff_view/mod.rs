@@ -211,12 +211,6 @@ fn show_inner(ui: &mut egui::Ui, state: &mut AppState, handle_input_enabled: boo
 
     let selected = state.selected_file;
 
-    // Get filename for panel headers.
-    let filename = state.file_pairs[selected]
-        .relative_path
-        .to_string_lossy()
-        .to_string();
-
     let resp = egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(state.diff_view_ctx.gutter_bg))
         .show(ui, |ui| {
@@ -250,7 +244,7 @@ fn show_inner(ui: &mut egui::Ui, state: &mut AppState, handle_input_enabled: boo
             // binary/too-large/loading placeholders).
             let available = ui.available_size();
             let full_width = available.x;
-            render_header_and_dispatch(ui, state, selected, &vctx, diff_mode, &filename);
+            render_header_and_dispatch(ui, state, selected, &vctx, diff_mode);
 
             // Borrow diff data immutably for rendering.
             // If file is too large, show a centered message with a "Calculate anyway" button.
@@ -429,27 +423,14 @@ fn apply_pending_goto_line(state: &mut AppState) {
 }
 
 /// Render the unified file header bar and dispatch its actions (copy, picker, mode toggle, etc).
-fn render_header_and_dispatch(
-    ui: &mut egui::Ui,
-    state: &mut AppState,
-    selected: usize,
-    vctx: &DiffViewCtx,
-    diff_mode: DiffMode,
-    filename: &str,
-) {
-    let file_kind = state.file_pairs[selected].kind;
-    let old_path = state.file_pairs[selected]
-        .old_relative_path
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string());
-    let editor_configured = state.settings.behavior.editor.is_some()
-        || std::env::var("VISUAL").is_ok()
-        || std::env::var("EDITOR").is_ok();
-    let arrow = crate::ui::common::icon_rename_arrow(vctx.nf);
-    let mode_change = state.file_pairs[selected]
-        .mode_change()
-        .map(|(a, b)| format!("{a:o}{arrow}{b:o}"));
-    let mode_tooltip = state.file_pairs[selected].mode_change().map(|(old, new)| {
+/// Rebuild the header string cache if the selection changed.
+fn ensure_header_cache(state: &mut AppState, selected: usize, nf: bool) {
+    if state.header_cache.file_idx == Some(selected) {
+        return;
+    }
+    let pair = &state.file_pairs[selected];
+    let arrow = crate::ui::common::icon_rename_arrow(nf);
+    let mode_tooltip = pair.mode_change().map(|(old, new)| {
         use crate::domain::file_pair::format_rwx;
         let roles = ["owner", "group", "other"];
         let mut lines = Vec::new();
@@ -467,13 +448,38 @@ fn render_header_and_dispatch(
         }
         lines.join("\n")
     });
+    state.header_cache = HeaderCache {
+        file_idx: Some(selected),
+        filename: pair.relative_path.to_string_lossy().to_string(),
+        old_path: pair
+            .old_relative_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        mode_change: pair
+            .mode_change()
+            .map(|(a, b)| format!("{a:o}{arrow}{b:o}")),
+        mode_tooltip,
+    };
+}
+
+fn render_header_and_dispatch(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    selected: usize,
+    vctx: &DiffViewCtx,
+    diff_mode: DiffMode,
+) {
+    ensure_header_cache(state, selected, vctx.nf);
+    let file_kind = state.file_pairs[selected].kind;
+    let editor_configured = state.editor_cmd.is_some();
+    let cached = &state.header_cache;
     let header_actions = header::render_unified_header(
         ui,
-        filename,
-        old_path.as_deref(),
+        &cached.filename,
+        cached.old_path.as_deref(),
         file_kind,
-        mode_change.as_deref(),
-        mode_tooltip.as_deref(),
+        cached.mode_change.as_deref(),
+        cached.mode_tooltip.as_deref(),
         state.copied_at,
         vctx,
         diff_mode,
@@ -483,7 +489,7 @@ fn render_header_and_dispatch(
         &state.settings.keybinds,
     );
     if header_actions.copy_clicked {
-        ui.ctx().copy_text(filename.to_string());
+        ui.ctx().copy_text(state.header_cache.filename.clone());
         state.copied_at = Some(std::time::Instant::now());
     }
     if header_actions.picker_clicked {
@@ -716,6 +722,19 @@ impl GalleyCache {
     pub fn clear(&mut self) {
         self.map.clear();
     }
+}
+
+/// Header display strings derived from the selected file. Pure functions of
+/// immutable `FilePair` data, so they are rebuilt only on selection change
+/// instead of every frame.
+#[derive(Default)]
+pub struct HeaderCache {
+    /// File index these strings were built for.
+    file_idx: Option<usize>,
+    filename: String,
+    old_path: Option<String>,
+    mode_change: Option<String>,
+    mode_tooltip: Option<String>,
 }
 
 /// Shared painter/position parameters for row rendering functions.

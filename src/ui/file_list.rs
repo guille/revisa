@@ -152,6 +152,19 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     let mut toggle_dir_path: Option<Vec<usize>> = None;
     let mut exclude_dir_path: Option<std::path::PathBuf> = None;
 
+    // Read pointer state once; per-row hit tests below are plain rect checks
+    // instead of per-row input-lock round trips.
+    let (primary_clicked, secondary_clicked, any_click, interact_pos, hover_pos) = ui.input(|i| {
+        (
+            i.pointer.primary_clicked(),
+            i.pointer.secondary_clicked(),
+            i.pointer.any_click(),
+            i.pointer.interact_pos(),
+            i.pointer.hover_pos(),
+        )
+    });
+    let hit = |rect: egui::Rect, pos: Option<egui::Pos2>| pos.is_some_and(|p| rect.contains(p));
+
     egui::ScrollArea::vertical()
         .auto_shrink([false; 2])
         .show(ui, |ui| {
@@ -209,47 +222,31 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
                         // Click detection via passive pointer query (avoids stealing hover from label).
                         let row_rect = dir_row.response.rect;
-                        let primary_clicked = ui.input(|i| {
-                            i.pointer.primary_clicked()
-                                && i.pointer
-                                    .interact_pos()
-                                    .is_some_and(|p| row_rect.contains(p))
-                        });
-                        if primary_clicked {
+                        if primary_clicked && hit(row_rect, interact_pos) {
                             toggle_dir_path = Some(path.clone());
                         }
 
-                        // Right-click context menu — detect via passive pointer query on full row.
-                        let secondary_clicked = ui.input(|i| {
-                            i.pointer.secondary_clicked()
-                                && i.pointer
-                                    .interact_pos()
-                                    .is_some_and(|p| row_rect.contains(p))
-                        });
-                        let dir_path_clone = dir_path.clone();
-                        let dir_name_clone = dir_name.clone();
+                        // Right-click context menu. At most one popup can be
+                        // open, so only build it when opening or already open.
+                        let row_secondary = secondary_clicked && hit(row_rect, interact_pos);
                         let popup_id = ui.id().with(("dir_ctx", dir_path));
-                        let set_cmd = if secondary_clicked {
-                            Some(egui::SetOpenCommand::Bool(true))
-                        } else {
-                            None
-                        };
-                        egui::Popup::new(popup_id, ui.ctx().clone(), row_rect, ui.layer_id())
-                            .open_memory(set_cmd)
-                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                            .layout(egui::Layout::top_down_justified(egui::Align::Min))
-                            .show(|ui| {
-                                ui.set_min_width(140.0);
-                                if ui.button(format!("Exclude {dir_name_clone}/")).clicked() {
-                                    exclude_dir_path = Some(dir_path_clone);
-                                    ui.close();
-                                }
-                            });
+                        if row_secondary || egui::Popup::is_id_open(ui.ctx(), popup_id) {
+                            let set_cmd = row_secondary.then_some(egui::SetOpenCommand::Bool(true));
+                            egui::Popup::new(popup_id, ui.ctx().clone(), row_rect, ui.layer_id())
+                                .open_memory(set_cmd)
+                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                                .layout(egui::Layout::top_down_justified(egui::Align::Min))
+                                .show(|ui| {
+                                    ui.set_min_width(140.0);
+                                    if ui.button(format!("Exclude {dir_name}/")).clicked() {
+                                        exclude_dir_path = Some(dir_path.clone());
+                                        ui.close();
+                                    }
+                                });
+                        }
 
                         // Hover highlight.
-                        let pointer_in_row = ui
-                            .input(|i| i.pointer.hover_pos().is_some_and(|p| row_rect.contains(p)));
-                        if pointer_in_row {
+                        if hit(row_rect, hover_pos) {
                             ui.painter().rect_filled(
                                 row_rect,
                                 0.0,
@@ -296,19 +293,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                         }
 
                         // Check if the pointer clicked anywhere in the row.
-                        let pointer_clicked_in_row = ui.input(|i| {
-                            i.pointer.any_click()
-                                && i.pointer
-                                    .interact_pos()
-                                    .is_some_and(|p| row_rect.contains(p))
-                        });
-                        if pointer_clicked_in_row && !cb_clicked {
+                        if any_click && hit(row_rect, interact_pos) && !cb_clicked {
                             clicked_file = Some(file_idx);
                         }
 
                         // Hover detection for highlight and tooltip.
-                        let pointer_in_row = ui
-                            .input(|i| i.pointer.hover_pos().is_some_and(|p| row_rect.contains(p)));
+                        let pointer_in_row = hit(row_rect, hover_pos);
 
                         // Highlight row on hover/selection.
                         if is_selected {

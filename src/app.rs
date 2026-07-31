@@ -291,6 +291,13 @@ pub struct AppState {
     /// Cross-frame cache of shaped line galleys; invalidated per file on diff
     /// recompute and wholesale on display-scale changes.
     pub galley_cache: std::cell::RefCell<crate::ui::diff_view::GalleyCache>,
+    /// Header display strings for the selected file; rebuilt on selection change.
+    pub header_cache: crate::ui::diff_view::HeaderCache,
+    /// Status-bar labels; rebuilt on scroll/selection/fold transitions.
+    pub status_bar_cache: crate::ui::status_bar::StatusBarCache,
+    /// Editor command resolved once at startup:
+    /// `behavior.editor`, then `$VISUAL`, then `$EDITOR`.
+    pub editor_cmd: Option<String>,
     /// Timestamp when the path was last copied to clipboard (for feedback indicator).
     pub copied_at: Option<std::time::Instant>,
     /// Deferred clipboard copy (set by keybind handler, consumed by UI).
@@ -379,6 +386,14 @@ impl AppState {
             files_computed,
             diff_view_ctx,
             galley_cache: std::cell::RefCell::new(crate::ui::diff_view::GalleyCache::default()),
+            header_cache: crate::ui::diff_view::HeaderCache::default(),
+            status_bar_cache: crate::ui::status_bar::StatusBarCache::default(),
+            editor_cmd: settings
+                .behavior
+                .editor
+                .clone()
+                .or_else(|| std::env::var("VISUAL").ok())
+                .or_else(|| std::env::var("EDITOR").ok()),
             copied_at: None,
             pending_copy_path: None,
             pending_open_picker: false,
@@ -799,8 +814,7 @@ impl AppState {
         }
     }
 
-    /// Open the currently selected file in an external editor.
-    /// Uses `settings.behavior.editor`, falling back to `$VISUAL` then `$EDITOR`.
+    /// Open the currently selected file in `editor_cmd` (resolved at startup).
     /// Only opens the new (right) file — opening deleted files is not useful.
     pub fn open_in_editor(&self) {
         let pair = self.selected_pair();
@@ -812,15 +826,7 @@ impl AppState {
         // Resolve symlinks so the editor opens the real file.
         let resolved = std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.clone());
 
-        let editor_cmd = self
-            .settings
-            .behavior
-            .editor
-            .clone()
-            .or_else(|| std::env::var("VISUAL").ok())
-            .or_else(|| std::env::var("EDITOR").ok());
-
-        let Some(cmd) = editor_cmd else {
+        let Some(cmd) = self.editor_cmd.as_deref() else {
             eprintln!(
                 "No editor configured. Set behavior.editor in config.toml, or $VISUAL / $EDITOR."
             );
@@ -828,7 +834,7 @@ impl AppState {
         };
 
         // Split command, respecting single/double quotes (e.g. `'/usr/bin/my editor' --wait`).
-        let parts = split_shell_words(&cmd);
+        let parts = split_shell_words(cmd);
         if parts.is_empty() {
             return;
         }
