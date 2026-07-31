@@ -529,23 +529,22 @@ pub fn fuzzy_match(query: &str, target: &str) -> Option<FuzzyMatch> {
         });
     }
 
-    let query_lower = query.to_lowercase();
-    let target_lower = target.to_lowercase();
-    let target_bytes = target.as_bytes();
+    // Lowercase per char, taking the first char of multi-char expansions
+    // (same convention as search): keeps char positions aligned 1:1 with the
+    // original string, so byte offsets below are always valid in `target`.
+    let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
 
-    let mut query_chars = query_lower.chars().peekable();
+    let target_bytes = target.as_bytes();
+    let mut query_chars = query.chars().map(lower).peekable();
     let mut score: i64 = 0;
     let mut last_match_pos: Option<usize> = None;
     let mut positions = Vec::with_capacity(query.len());
 
-    // Find basename start (after last '/').
+    // Find basename start (after last '/'), as a byte offset.
     let basename_start = target.rfind('/').map_or(0, |p| p + 1);
 
-    // Track byte offset alongside char position.
-    let mut byte_offset = 0usize;
-    for (pos, ch) in target_lower.chars().enumerate() {
-        let ch_len = ch.len_utf8();
-        if query_chars.peek() == Some(&ch) {
+    for (pos, (byte_offset, orig_ch)) in target.char_indices().enumerate() {
+        if query_chars.peek() == Some(&lower(orig_ch)) {
             query_chars.next();
 
             // Gap penalty: penalize distance between matched characters.
@@ -564,20 +563,20 @@ pub fn fuzzy_match(query: &str, target: &str) -> Option<FuzzyMatch> {
             }
 
             // Word-boundary bonus: start of target, after '/', '_', '.', or camelCase.
-            let is_boundary = pos == 0
+            let is_boundary = byte_offset == 0
                 || matches!(
-                    target_bytes.get(pos.wrapping_sub(1)),
+                    target_bytes.get(byte_offset.wrapping_sub(1)),
                     Some(b'/' | b'_' | b'.')
                 )
-                || (pos > 0
-                    && target_bytes[pos].is_ascii_uppercase()
-                    && target_bytes[pos - 1].is_ascii_lowercase());
+                || (orig_ch.is_ascii_uppercase()
+                    && byte_offset > 0
+                    && target_bytes[byte_offset - 1].is_ascii_lowercase());
             if is_boundary {
                 score += 8;
             }
 
             // Basename bonus: matches in the filename are more relevant.
-            if pos >= basename_start {
+            if byte_offset >= basename_start {
                 score += 15;
             }
 
@@ -585,7 +584,6 @@ pub fn fuzzy_match(query: &str, target: &str) -> Option<FuzzyMatch> {
             last_match_pos = Some(pos);
             score += 1;
         }
-        byte_offset += ch_len;
     }
 
     // All query chars must be consumed.
@@ -790,6 +788,44 @@ mod tests {
         assert!(fuzzy_score("über", "überall.rs").is_some());
         // Non-matching Unicode.
         assert!(fuzzy_score("αβ", "gamma.rs").is_none());
+    }
+
+    #[test]
+    fn test_fuzzy_non_ascii_positions_are_byte_offsets() {
+        // "área/" is 5 chars but 6 bytes — positions must be byte offsets
+        // into the original string, on valid char boundaries.
+        let target = "área/config.rs";
+        let m = fuzzy_match("config", target).unwrap();
+        assert_eq!(m.positions, vec![6, 7, 8, 9, 10, 11]);
+        assert!(m.positions.iter().all(|&p| target.is_char_boundary(p)));
+
+        // Scoring must match the pure-ASCII equivalent (boundary, basename,
+        // and consecutive bonuses land identically).
+        assert_eq!(
+            fuzzy_score("config", "área/config.rs"),
+            fuzzy_score("config", "area/config.rs"),
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_camel_case_after_non_ascii() {
+        // 'C' follows an ASCII-lowercase char, but its byte offset differs
+        // from its char index ('ü' is 2 bytes) — the camelCase bonus must
+        // still land.
+        assert!(
+            fuzzy_score("c", "müllerConfig.rs").unwrap()
+                > fuzzy_score("c", "müllerconfig.rs").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_lowercase_expansion_stays_aligned() {
+        // 'İ' lowercases to a two-char sequence; positions must still be
+        // valid boundaries of the original string.
+        let target = "İstanbul/config.rs";
+        let m = fuzzy_match("istanbul", target).unwrap();
+        assert_eq!(m.positions[0], 0);
+        assert!(m.positions.iter().all(|&p| target.is_char_boundary(p)));
     }
 
     #[test]
