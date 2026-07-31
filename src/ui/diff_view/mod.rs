@@ -1016,12 +1016,16 @@ fn render_diff_content_unified(
 
         match seg {
             Segment::Visible { data_range } => {
-                // We need to iterate data rows and expand modified ones.
-                // First, skip data rows until we reach scroll_start within this segment.
+                // Jump to the first data row reaching into the scroll window
+                // via the unified prefix sum (O(log n)) instead of walking
+                // the segment row by row every frame.
                 let seg_view_start = view_row;
-                let mut seg_view_offset = 0usize;
+                let skip = fold_state
+                    .unified_rows_before(data_range, scroll_start.saturating_sub(seg_view_start));
+                let mut seg_view_offset =
+                    offsets[data_range.start + skip] - offsets[data_range.start];
 
-                for data_idx in data_range.clone() {
+                for data_idx in data_range.start + skip..data_range.end {
                     let row = &data.aligned_rows[data_idx];
                     let row_h = if matches!(row, AlignedRow::Both { modified: true, .. }) {
                         2
@@ -1030,11 +1034,6 @@ fn render_diff_content_unified(
                     };
                     let row_view_start = seg_view_start + seg_view_offset;
 
-                    // Skip rows entirely before scroll window.
-                    if row_view_start + row_h <= scroll_start {
-                        seg_view_offset += row_h;
-                        continue;
-                    }
                     // Stop if past scroll window.
                     if row_view_start >= scroll_end {
                         break;

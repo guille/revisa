@@ -375,6 +375,21 @@ impl FoldState {
         )
     }
 
+    /// Count data rows at the start of `data_range` that lie entirely before
+    /// `view_rows` unified view rows from the segment start. Used by the
+    /// renderer to jump to the scroll window in O(log n) instead of walking
+    /// the segment row by row. Requires `ensure_unified_offsets`.
+    pub fn unified_rows_before(&self, data_range: &Range<usize>, view_rows: usize) -> usize {
+        let offsets = self
+            .unified_offsets
+            .as_ref()
+            .expect("ensure_unified_offsets must be called before unified_rows_before");
+        // A row is entirely before the window when its end offset is within
+        // the skipped view rows.
+        let target = offsets[data_range.start] + view_rows;
+        offsets[data_range.start + 1..=data_range.end].partition_point(|&end| end <= target)
+    }
+
     /// Map a data-row index to its unified view-row index. Returns None if hidden.
     pub fn data_to_unified_view_row(&self, data_idx: usize) -> Option<usize> {
         let offsets = self.unified_offsets.as_ref()?;
@@ -1108,6 +1123,32 @@ mod tests {
         fs.ensure_unified_offsets(&rows);
         let offsets = fs.unified_offsets_ref().unwrap();
         assert_eq!(offsets, &[0, 1, 3, 4]);
+    }
+
+    #[test]
+    fn test_unified_rows_before() {
+        // Heights: C=1 M=2 C=1 M=2 C=1 → offsets [0, 1, 3, 4, 6, 7].
+        let rows = make_aligned_rows("CMCMC");
+        let mut fs = test_fold(5, &make_hunks(&[(0, 5)]));
+        fs.ensure_unified_offsets(&rows);
+
+        let range = 0..5;
+        assert_eq!(fs.unified_rows_before(&range, 0), 0);
+        // Row 0 (height 1) ends exactly at 1 view row → entirely before.
+        assert_eq!(fs.unified_rows_before(&range, 1), 1);
+        // Row 1 (modified, height 2) straddles → still kept.
+        assert_eq!(fs.unified_rows_before(&range, 2), 1);
+        assert_eq!(fs.unified_rows_before(&range, 3), 2);
+        assert_eq!(fs.unified_rows_before(&range, 6), 4);
+        // Whole segment before the window.
+        assert_eq!(fs.unified_rows_before(&range, 7), 5);
+
+        // Sub-range starting mid-file: offsets are relative to range start.
+        let sub = 2..5; // heights 1, 2, 1
+        assert_eq!(fs.unified_rows_before(&sub, 0), 0);
+        assert_eq!(fs.unified_rows_before(&sub, 1), 1);
+        assert_eq!(fs.unified_rows_before(&sub, 2), 1);
+        assert_eq!(fs.unified_rows_before(&sub, 3), 2);
     }
 
     #[test]
