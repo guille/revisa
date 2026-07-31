@@ -21,6 +21,10 @@ const SAME_SIZE_LINES: usize = 300;
 const BINARY: usize = 1;
 /// Above the default `max_diff_lines`, to exercise the size-guard path.
 const HUGE_LINES: usize = 4_500;
+/// Minified single-line files (per scale): stresses per-line costs
+/// (fancy-regex highlighting, inline word diff) rather than line counts.
+const MINIFIED: usize = 1;
+const MINIFIED_LINE_BYTES: usize = 64 * 1024;
 /// Edit percentage applied to modified files.
 const MODIFIED_EDIT_PCT: usize = 12;
 
@@ -281,6 +285,19 @@ fn mutate(lines: &mut Vec<String>, lang: Lang, rng: &mut Rng, pct: usize) {
     }
 }
 
+/// One dense minified-JS-style line of ~`MINIFIED_LINE_BYTES`.
+fn gen_minified_line(rng: &mut Rng) -> String {
+    use std::fmt::Write;
+    let mut line = String::with_capacity(MINIFIED_LINE_BYTES + 64);
+    while line.len() < MINIFIED_LINE_BYTES {
+        let a = rng.ident();
+        let b = rng.ident();
+        let c = rng.word();
+        let _ = write!(line, "var {a}={{{b}:function(e){{return e.{c}}}}};");
+    }
+    line
+}
+
 fn write_lines(path: &Path, lines: &[String]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -399,6 +416,15 @@ pub fn generate(scale: usize, seed: u64) -> io::Result<Corpus> {
         write_lines(&left.join(&path), &base)?;
         let mut edited = base.clone();
         mutate(&mut edited, Lang::Rust, &mut rng, 5);
+        write_lines(&right.join(&path), &edited)?;
+    }
+
+    for _ in 0..MINIFIED * scale {
+        let path = namer.path(&mut rng, Lang::Json).with_extension("js");
+        let base = vec![gen_minified_line(&mut rng)];
+        write_lines(&left.join(&path), &base)?;
+        // Change the tail so the pair diffs as one modified (huge) line pair.
+        let edited = vec![format!("{}var {}=1;", base[0], rng.ident())];
         write_lines(&right.join(&path), &edited)?;
     }
 

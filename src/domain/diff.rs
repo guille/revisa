@@ -120,6 +120,9 @@ pub enum InlineTag {
 /// to be useful, so we skip it and treat the entire line as changed.
 const INLINE_MIN_RATIO: f32 = 0.4;
 
+/// Lines longer than this get no inline diff (whole line treated as changed).
+const INLINE_MAX_LINE_BYTES: usize = 1_000;
+
 /// Compute word-level inline diff between an old line and a new line.
 /// Returns (old_spans, new_spans) where each span is a byte range into
 /// the respective input line, tagged as equal/delete/insert.
@@ -127,6 +130,11 @@ const INLINE_MIN_RATIO: f32 = 0.4;
 /// If the lines are too dissimilar (below `INLINE_MIN_RATIO`), returns empty
 /// spans so the caller can fall back to whole-line highlighting.
 pub fn diff_inline(old_line: &str, new_line: &str) -> (Vec<InlineSpan>, Vec<InlineSpan>) {
+    // Skip very long lines (minified content): tokenize + diff cost grows
+    // with line length, and word-level highlights aren't readable there.
+    if old_line.len() > INLINE_MAX_LINE_BYTES || new_line.len() > INLINE_MAX_LINE_BYTES {
+        return (Vec::new(), Vec::new());
+    }
     let old_tokens = tokenize(old_line);
     let new_tokens = tokenize(new_line);
 
@@ -348,6 +356,16 @@ mod tests {
     fn test_inline_diff_completely_different() {
         // Lines with no similarity should return empty spans (min_ratio guard).
         let (old_spans, new_spans) = diff_inline("aaa", "zzz");
+        assert!(old_spans.is_empty());
+        assert!(new_spans.is_empty());
+    }
+
+    #[test]
+    fn test_inline_diff_skips_very_long_lines() {
+        // Minified-style lines skip inline diffing (length guard).
+        let old = "x=1;".repeat(300);
+        let new = format!("{old}y=2;");
+        let (old_spans, new_spans) = diff_inline(&old, &new);
         assert!(old_spans.is_empty());
         assert!(new_spans.is_empty());
     }

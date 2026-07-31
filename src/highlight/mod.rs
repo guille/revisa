@@ -152,6 +152,10 @@ pub struct SyntaxSpan {
     pub style: SyntectStyle,
 }
 
+/// Lines longer than this are not syntax-highlighted (rendered with the
+/// default foreground instead).
+const MAX_HIGHLIGHT_LINE_BYTES: usize = 1_000;
+
 /// Global highlighting resources (loaded once).
 pub struct Highlighter {
     syntax_set: SyntaxSet,
@@ -216,6 +220,14 @@ impl Highlighter {
         let mut lines = Vec::new();
 
         for line in content.lines() {
+            // Very long lines (minified content) render with the default
+            // style: regex cost grows with line length — pathologically so
+            // under fancy-regex — and highlighting adds nothing there.
+            // The parse state carries over the skipped line unchanged.
+            if line.len() > MAX_HIGHLIGHT_LINE_BYTES {
+                lines.push(Vec::new());
+                continue;
+            }
             // syntect expects the line with its newline for state tracking.
             // Reuse a buffer to avoid per-line allocation.
             buf.clear();
@@ -445,6 +457,20 @@ mod tests {
         assert_eq!(result.lines.len(), 3);
         // Each line should have at least one span.
         assert!(!result.lines[0].is_empty());
+    }
+
+    #[test]
+    fn test_highlight_file_skips_very_long_lines() {
+        let h = Highlighter::new(None);
+        let long = "let x = 1; ".repeat(200); // > MAX_HIGHLIGHT_LINE_BYTES
+        let content = format!("fn main() {{}}\n{long}\nfn other() {{}}\n");
+        let result = h.highlight_file(&content, "test.rs");
+        assert_eq!(result.lines.len(), 3);
+        assert!(!result.lines[0].is_empty());
+        // Long line renders plain (empty spans → default fg in compose_line).
+        assert!(result.lines[1].is_empty());
+        // Following lines are still highlighted.
+        assert!(!result.lines[2].is_empty());
     }
 
     #[test]
