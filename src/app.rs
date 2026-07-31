@@ -538,7 +538,10 @@ impl AppState {
                             false,
                         );
                         let _ = bg_tx.send((i, data));
-                        bg_ctx.request_repaint();
+                        // Deadline instead of immediate: completions within the
+                        // window share one repaint, so the load doesn't drive
+                        // the frame loop at full rate just for the progress text.
+                        bg_ctx.request_repaint_after(std::time::Duration::from_millis(100));
                     });
             });
         }
