@@ -29,6 +29,7 @@ src/
 ├── domain/
 │   ├── mod.rs
 │   ├── diff.rs            — Diff computation
+│   ├── editor.rs          — "Open in editor" argv building (placeholders + per-editor line syntax)
 │   ├── file_pair.rs       — File pairing, walk_and_pair, rename detection
 │   ├── file_tree.rs       — Manage the file tree
 │   ├── fold.rs            — FoldState, DiffMode, UnifiedSubRow, unified offset mapping

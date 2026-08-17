@@ -47,11 +47,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, font_size: f32) {
 
     // Current hunk position: the segment walks below only change on
     // scroll/file/mode/fold transitions, so recompute only when the key moves.
-    let vp_rows = state.diff_rect.map_or(30, |r| {
-        (r.height() / state.settings.behavior.line_height)
-            .floor()
-            .max(1.0) as usize
-    });
+    let vp_rows = state.viewport_rows().unwrap_or(30);
     let total_rows_cached =
         state
             .diff_cache

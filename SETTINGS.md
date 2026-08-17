@@ -49,9 +49,15 @@ All colors are hex strings in `"#RRGGBB"` or `"#RRGGBBAA"` format. The alpha cha
 | `theme`                | string | `""`    | Path to a `.tmTheme` file for syntax highlighting. When empty, the built-in theme is used. |
 | `line_height`          | float  | `1.5`  | Line height as a multiplier of `font.size`. The actual pixel height is `font.size × line_height`. Must be at least `1.0`. |
 | `fold_row_height`      | int    | `2`     | Number of `line_height` units each fold separator occupies. `1` = compact, `2` = standard, `3` = spacious. Must be at least `1`. |
-| `editor`               | string | `""`    | Editor command for "open in editor" (Ctrl+O). When empty, falls back to `$VISUAL` then `$EDITOR`. May include arguments. |
+| `editor`               | string | `""`    | Editor command for "open in editor" (Ctrl+O). When empty, falls back to `$VISUAL` then `$EDITOR`. May include arguments and `{file}` / `{line}` placeholders. |
 | `default_diff_mode`    | string | `"side-by-side"` | Default diff view mode. Accepts `"side-by-side"`, `"unified"` or `"auto"`. With `"auto"` the mode is picked once at startup based on window width: side-by-side when two 80-column panels fit, unified otherwise. |
 | `max_diff_lines`       | int    | `4000`  | Maximum lines per file before showing a "too large" placeholder. Files above this limit can still be computed on demand via the "Calculate anyway" button. Set to `0` to disable the limit (all files computed regardless of size). |
+
+### Open in editor
+
+The file opens at the line in the vertical middle of the viewport, on the new (right) side of the diff. Revisa automatically does this for most popular editors without needing extra configuration.
+
+For full control you can use the `{file}` and `{line}` placeholders. Using only `{file}` disables the attempt to open with a specific line.
 
 ## `[keybinds]`
 

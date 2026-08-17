@@ -183,6 +183,21 @@ impl FileDiffData {
         })
     }
 
+    /// Inverse of [`Self::line_to_data_row`]: the 1-based new-side line number at
+    /// `data_row`, scanning forward when that row has no new-side line (a deletion).
+    /// Returns None if no new-side line exists at or after `data_row`.
+    pub fn data_row_to_line(&self, data_row: usize) -> Option<usize> {
+        self.aligned_rows
+            .get(data_row..)?
+            .iter()
+            .find_map(|row| match row {
+                AlignedRow::Both { right_line, .. } | AlignedRow::RightOnly { right_line } => {
+                    Some(*right_line + 1)
+                }
+                AlignedRow::LeftOnly { .. } => None,
+            })
+    }
+
     /// Create a placeholder for files that exceed the size limit.
     pub fn too_large_placeholder(
         msg: &str,
@@ -848,20 +863,55 @@ impl AppState {
             return;
         };
 
-        // Split command, respecting single/double quotes (e.g. `'/usr/bin/my editor' --wait`).
-        let parts = split_shell_words(cmd);
-        if parts.is_empty() {
+        let line = self.editor_target_line().unwrap_or(1);
+        let argv = crate::domain::editor::build_argv(cmd, &resolved, line);
+        if argv.is_empty() {
             return;
         }
 
-        match std::process::Command::new(&parts[0])
-            .args(&parts[1..])
-            .arg(&resolved)
+        match std::process::Command::new(&argv[0])
+            .args(&argv[1..])
             .spawn()
         {
             Ok(_) => {}
             Err(e) => eprintln!("Failed to open editor '{cmd}': {e}"),
         }
+    }
+
+    /// New-side line number to open the editor at: the vertical middle of the
+    /// viewport, since editors center the line they are given.
+    /// None when the diff isn't available yet or the file has no new-side lines.
+    fn editor_target_line(&self) -> Option<usize> {
+        let diff_data = self.diff_cache.get(&self.selected_file)?;
+        // Unified row mapping panics without computed offsets; fall back to
+        // side-by-side for files that have not been rendered in unified mode yet.
+        let effective_mode = match self.diff_mode {
+            DiffMode::Unified if diff_data.fold_state.unified_offsets_ref().is_some() => {
+                DiffMode::Unified
+            }
+            _ => DiffMode::SideBySide,
+        };
+        let total_view_rows = match effective_mode {
+            DiffMode::SideBySide => diff_data.fold_state.total_view_rows(),
+            DiffMode::Unified => diff_data
+                .fold_state
+                .total_view_rows_unified_cached()
+                .unwrap_or_else(|| diff_data.fold_state.total_view_rows()),
+        };
+        let line_at = |view_row| {
+            diff_data.data_row_to_line(
+                diff_data
+                    .fold_state
+                    .view_row_to_data_row_for_mode(view_row, effective_mode),
+            )
+        };
+
+        let top = self.scroll_row();
+        let middle =
+            (top + self.viewport_rows().unwrap_or(0) / 2).min(total_view_rows.saturating_sub(1));
+        // Past the last new-side line (a file ending in deletions) — the top row
+        // is the best remaining anchor.
+        line_at(middle).or_else(|| line_at(top))
     }
 
     /// Get the cached flattened file tree, recomputing if needed.
@@ -891,6 +941,16 @@ impl AppState {
     /// Current top visible row index (derived from scroll_y).
     pub fn scroll_row(&self) -> usize {
         (self.scroll.y / self.settings.behavior.line_height) as usize
+    }
+
+    /// Number of rows that fit in the diff viewport.
+    /// None before the first panel layout, when `diff_rect` is still unset.
+    pub fn viewport_rows(&self) -> Option<usize> {
+        self.diff_rect.map(|r| {
+            (r.height() / self.settings.behavior.line_height)
+                .floor()
+                .max(1.0) as usize
+        })
     }
 
     /// Set scroll to a specific row (snapping to row boundary, cancels momentum).
@@ -1332,41 +1392,196 @@ fn apply_inline_highlights_inplace(
     *styled = result;
 }
 
-/// Split a shell command string into words, respecting single and double quotes.
-/// Does not handle escape sequences — just basic quoting.
-fn split_shell_words(s: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-
-    for ch in s.chars() {
-        match ch {
-            '\'' if !in_double => {
-                in_single = !in_single;
-            }
-            '"' if !in_single => {
-                in_double = !in_double;
-            }
-            c if c.is_whitespace() && !in_single && !in_double => {
-                if !current.is_empty() {
-                    words.push(std::mem::take(&mut current));
-                }
-            }
-            c => current.push(c),
-        }
-    }
-    if !current.is_empty() {
-        words.push(current);
-    }
-    words
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::file_pair::FileChangeKind;
     use std::path::PathBuf;
+
+    /// Diff data with every row treated as changed, so nothing is folded and
+    /// view rows map 1:1 to data rows.
+    fn make_diff_data(rows: Vec<AlignedRow>) -> FileDiffData {
+        let n = rows.len();
+        let hunks = vec![Hunk { row_range: 0..n }];
+        FileDiffData {
+            old_lines: Arc::new(LineIndex::empty()),
+            new_lines: Arc::new(LineIndex::empty()),
+            aligned_rows: Arc::new(rows),
+            fold_state: FoldState::new(n, &hunks, 3, 20, 2),
+            hunks,
+            left_styled: crate::highlight::StyledRows::default(),
+            right_styled: crate::highlight::StyledRows::default(),
+            styles: Vec::new(),
+            too_large_message: None,
+            binary: false,
+        }
+    }
+
+    // ── data_row_to_line ─────────────────────────────────────────────
+
+    #[test]
+    fn data_row_to_line_both_and_right_only() {
+        let data = make_diff_data(vec![
+            AlignedRow::Both {
+                left_line: 0,
+                right_line: 0,
+                modified: false,
+            },
+            AlignedRow::RightOnly { right_line: 1 },
+        ]);
+        assert_eq!(data.data_row_to_line(0), Some(1));
+        assert_eq!(data.data_row_to_line(1), Some(2));
+    }
+
+    #[test]
+    fn data_row_to_line_scans_past_deletions() {
+        let data = make_diff_data(vec![
+            AlignedRow::LeftOnly { left_line: 0 },
+            AlignedRow::LeftOnly { left_line: 1 },
+            AlignedRow::Both {
+                left_line: 2,
+                right_line: 0,
+                modified: false,
+            },
+        ]);
+        assert_eq!(data.data_row_to_line(0), Some(1));
+    }
+
+    #[test]
+    fn data_row_to_line_none_when_only_deletions_remain() {
+        let data = make_diff_data(vec![
+            AlignedRow::Both {
+                left_line: 0,
+                right_line: 0,
+                modified: false,
+            },
+            AlignedRow::LeftOnly { left_line: 1 },
+        ]);
+        assert_eq!(data.data_row_to_line(1), None);
+    }
+
+    #[test]
+    fn data_row_to_line_none_out_of_range() {
+        assert_eq!(make_diff_data(vec![]).data_row_to_line(0), None);
+        let data = make_diff_data(vec![AlignedRow::RightOnly { right_line: 0 }]);
+        assert_eq!(data.data_row_to_line(5), None);
+    }
+
+    #[test]
+    fn data_row_to_line_round_trips_with_line_to_data_row() {
+        let rows = vec![
+            AlignedRow::Both {
+                left_line: 0,
+                right_line: 0,
+                modified: false,
+            },
+            AlignedRow::LeftOnly { left_line: 1 },
+            AlignedRow::RightOnly { right_line: 1 },
+            AlignedRow::Both {
+                left_line: 2,
+                right_line: 2,
+                modified: true,
+            },
+        ];
+        let mut data = make_diff_data(rows);
+        data.new_lines = Arc::new(LineIndex::new("a\nb\nc".to_string()));
+        for line in 1..=3 {
+            let row = data
+                .line_to_data_row(line)
+                .expect("line is within the new-side range");
+            assert_eq!(data.data_row_to_line(row), Some(line));
+        }
+    }
+
+    // ── editor_target_line ───────────────────────────────────────────
+
+    /// A viewport `rows` tall, in the row units `scroll_row` uses.
+    fn set_viewport_rows(state: &mut AppState, rows: usize) {
+        let height = rows as f32 * state.settings.behavior.line_height;
+        state.diff_rect = Some(eframe::egui::Rect::from_min_size(
+            eframe::egui::pos2(0.0, 0.0),
+            eframe::egui::vec2(800.0, height),
+        ));
+    }
+
+    #[test]
+    fn editor_target_line_without_viewport_uses_top_row() {
+        let mut state = make_state(&["a.rs"]);
+        state.diff_cache.insert(
+            0,
+            make_diff_data(vec![
+                AlignedRow::Both {
+                    left_line: 0,
+                    right_line: 0,
+                    modified: false,
+                },
+                AlignedRow::LeftOnly { left_line: 1 },
+                AlignedRow::RightOnly { right_line: 1 },
+            ]),
+        );
+        assert_eq!(state.editor_target_line(), Some(1));
+        state.scroll_to_row(2);
+        assert_eq!(state.editor_target_line(), Some(2));
+        // Viewport top is a deleted line — scans forward to the next new-side line.
+        state.scroll_to_row(1);
+        assert_eq!(state.editor_target_line(), Some(2));
+    }
+
+    #[test]
+    fn editor_target_line_aims_at_viewport_middle() {
+        let mut state = make_state(&["a.rs"]);
+        let rows: Vec<AlignedRow> = (0..100)
+            .map(|i| AlignedRow::Both {
+                left_line: i,
+                right_line: i,
+                modified: true,
+            })
+            .collect();
+        state.diff_cache.insert(0, make_diff_data(rows));
+        set_viewport_rows(&mut state, 20);
+
+        // Rows 0..20 visible → row 10 → line 11.
+        assert_eq!(state.editor_target_line(), Some(11));
+        state.scroll_to_row(30);
+        assert_eq!(state.editor_target_line(), Some(41));
+    }
+
+    #[test]
+    fn editor_target_line_clamps_middle_to_last_row() {
+        let mut state = make_state(&["a.rs"]);
+        state.diff_cache.insert(
+            0,
+            make_diff_data(vec![
+                AlignedRow::RightOnly { right_line: 0 },
+                AlignedRow::RightOnly { right_line: 1 },
+            ]),
+        );
+        // Viewport much taller than the file — never runs off the end.
+        set_viewport_rows(&mut state, 40);
+        assert_eq!(state.editor_target_line(), Some(2));
+    }
+
+    #[test]
+    fn editor_target_line_falls_back_when_middle_has_no_new_side() {
+        let mut state = make_state(&["a.rs"]);
+        let mut rows = vec![AlignedRow::Both {
+            left_line: 0,
+            right_line: 0,
+            modified: false,
+        }];
+        // File ends in a long run of deletions: the middle row has no new-side
+        // line at or after it, so the top row's line is used.
+        rows.extend((1..40).map(|i| AlignedRow::LeftOnly { left_line: i }));
+        state.diff_cache.insert(0, make_diff_data(rows));
+        set_viewport_rows(&mut state, 20);
+        assert_eq!(state.editor_target_line(), Some(1));
+    }
+
+    #[test]
+    fn editor_target_line_none_without_diff_data() {
+        let state = make_state(&["a.rs"]);
+        assert_eq!(state.editor_target_line(), None);
+    }
 
     fn make_pairs(names: &[&str]) -> Vec<FilePair> {
         names
@@ -1612,39 +1827,5 @@ mod tests {
             assert_eq!(idx.line(i), *exp, "mismatch at line {i}");
         }
         assert_eq!(idx.len(), expected.len());
-    }
-
-    // ── split_shell_words tests ──────────────────────────────────────
-
-    #[test]
-    fn shell_words_simple() {
-        assert_eq!(split_shell_words("code --wait"), vec!["code", "--wait"]);
-    }
-
-    #[test]
-    fn shell_words_single_quotes() {
-        assert_eq!(
-            split_shell_words("'/usr/bin/my editor' --wait"),
-            vec!["/usr/bin/my editor", "--wait"]
-        );
-    }
-
-    #[test]
-    fn shell_words_double_quotes() {
-        assert_eq!(
-            split_shell_words(r#""my editor" arg1 arg2"#),
-            vec!["my editor", "arg1", "arg2"]
-        );
-    }
-
-    #[test]
-    fn shell_words_empty() {
-        assert!(split_shell_words("").is_empty());
-        assert!(split_shell_words("   ").is_empty());
-    }
-
-    #[test]
-    fn shell_words_extra_whitespace() {
-        assert_eq!(split_shell_words("  vim   file  "), vec!["vim", "file"]);
     }
 }

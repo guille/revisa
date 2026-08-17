@@ -1,4 +1,5 @@
 pub mod diff;
+pub mod editor;
 pub mod file_pair;
 pub mod file_tree;
 pub mod fold;
