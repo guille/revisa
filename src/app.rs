@@ -879,7 +879,7 @@ impl AppState {
     }
 
     /// New-side line number to open the editor at: the vertical middle of the
-    /// viewport, since editors center the line they are given.
+    /// on-screen rows, since editors center the line they are given.
     /// None when the diff isn't available yet or the file has no new-side lines.
     fn editor_target_line(&self) -> Option<usize> {
         let diff_data = self.diff_cache.get(&self.selected_file)?;
@@ -906,9 +906,12 @@ impl AppState {
             )
         };
 
-        let top = self.scroll_row();
-        let middle =
-            (top + self.viewport_rows().unwrap_or(0) / 2).min(total_view_rows.saturating_sub(1));
+        // Middle of the visible *rows*, not of the viewport: a view shorter than
+        // the viewport (short file, or most of it folded away) leaves slack below
+        // the last row, and aiming at the viewport's center overshoots into it.
+        let top = self.scroll_row().min(total_view_rows.saturating_sub(1));
+        let bottom = (top + self.viewport_rows().unwrap_or(0)).min(total_view_rows);
+        let middle = usize::midpoint(top, bottom);
         // Past the last new-side line (a file ending in deletions) — the top row
         // is the best remaining anchor.
         line_at(middle).or_else(|| line_at(top))
@@ -1402,7 +1405,11 @@ mod tests {
     /// view rows map 1:1 to data rows.
     fn make_diff_data(rows: Vec<AlignedRow>) -> FileDiffData {
         let n = rows.len();
-        let hunks = vec![Hunk { row_range: 0..n }];
+        make_diff_data_with_hunks(rows, vec![Hunk { row_range: 0..n }])
+    }
+
+    fn make_diff_data_with_hunks(rows: Vec<AlignedRow>, hunks: Vec<Hunk>) -> FileDiffData {
+        let n = rows.len();
         FileDiffData {
             old_lines: Arc::new(LineIndex::empty()),
             new_lines: Arc::new(LineIndex::empty()),
@@ -1547,18 +1554,52 @@ mod tests {
     }
 
     #[test]
-    fn editor_target_line_clamps_middle_to_last_row() {
+    fn editor_target_line_ignores_viewport_slack_below_short_file() {
         let mut state = make_state(&["a.rs"]);
+        let rows: Vec<AlignedRow> = (0..5)
+            .map(|i| AlignedRow::RightOnly { right_line: i })
+            .collect();
+        state.diff_cache.insert(0, make_diff_data(rows));
+        // Viewport much taller than the file: aim at the middle of the 5 rows,
+        // not at the viewport's center (which would clamp to the last line).
+        set_viewport_rows(&mut state, 40);
+        assert_eq!(state.editor_target_line(), Some(3));
+    }
+
+    #[test]
+    fn editor_target_line_ignores_viewport_slack_at_end_of_file() {
+        let mut state = make_state(&["a.rs"]);
+        let rows: Vec<AlignedRow> = (0..30)
+            .map(|i| AlignedRow::RightOnly { right_line: i })
+            .collect();
+        state.diff_cache.insert(0, make_diff_data(rows));
+        set_viewport_rows(&mut state, 20);
+        // Scrolled past the last full screenful: rows 20..30 are on screen, so
+        // the middle is row 25, not row 29.
+        state.scroll_to_row(20);
+        assert_eq!(state.editor_target_line(), Some(26));
+    }
+
+    #[test]
+    fn editor_target_line_targets_hunk_when_folds_shrink_the_view() {
+        let mut state = make_state(&["a.rs"]);
+        // A long file whose only change sits in the middle: everything else
+        // folds away, leaving a view far shorter than the viewport.
+        let rows: Vec<AlignedRow> = (0..90)
+            .map(|i| AlignedRow::Both {
+                left_line: i,
+                right_line: i,
+                modified: (44..46).contains(&i),
+            })
+            .collect();
         state.diff_cache.insert(
             0,
-            make_diff_data(vec![
-                AlignedRow::RightOnly { right_line: 0 },
-                AlignedRow::RightOnly { right_line: 1 },
-            ]),
+            make_diff_data_with_hunks(rows, vec![Hunk { row_range: 44..46 }]),
         );
-        // Viewport much taller than the file — never runs off the end.
         set_viewport_rows(&mut state, 40);
-        assert_eq!(state.editor_target_line(), Some(2));
+        // Visible: leading fold, context lines 42..44, the change on 45..46,
+        // context 47..49, trailing fold. The middle lands on the change.
+        assert_eq!(state.editor_target_line(), Some(46));
     }
 
     #[test]

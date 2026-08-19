@@ -55,7 +55,7 @@ All colors are hex strings in `"#RRGGBB"` or `"#RRGGBBAA"` format. The alpha cha
 
 ### Open in editor
 
-The file opens at the line in the vertical middle of the viewport, on the new (right) side of the diff. Revisa automatically does this for most popular editors without needing extra configuration.
+The file opens at the line in the vertical middle of the rows on screen, on the new (right) side of the diff. Revisa automatically does this for most popular editors without needing extra configuration.
 
 For full control you can use the `{file}` and `{line}` placeholders. Using only `{file}` disables the attempt to open with a specific line.
 
