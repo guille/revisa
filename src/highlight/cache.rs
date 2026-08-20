@@ -81,11 +81,15 @@ fn bat_cache_dir() -> PathBuf {
 /// 2. Bat's syntax cache (if present and enabled — wider language coverage)
 /// 3. User's `.sublime-syntax` files from `syntaxes_dir` (highest priority)
 ///
-/// The compiled cache is written to [`syntax_cache_path()`].
+/// The compiled cache is written to [`syntax_cache_path()`], unless it would add
+/// nothing to the bundled set.
 ///
-/// Returns the number of syntaxes in the compiled set.
+/// Returns how many syntaxes the cache adds beyond the bundled set; zero means
+/// nothing was written.
 pub fn build_syntax_cache(syntaxes_dir: &Path) -> Result<usize, String> {
-    let mut builder = load_bundled_syntaxes().into_builder();
+    let bundled = load_bundled_syntaxes();
+    let base_count = bundled.syntaxes().len();
+    let mut builder = bundled.into_builder();
 
     // Layer bat's syntaxes on top of bundled (if available).
     if let Some(bat_ss) = load_bat_syntaxes() {
@@ -111,7 +115,12 @@ pub fn build_syntax_cache(syntaxes_dir: &Path) -> Result<usize, String> {
     }
 
     let syntax_set = builder.build();
-    let count = syntax_set.syntaxes().len();
+    let total = syntax_set.syntaxes().len();
+    let extras = total.saturating_sub(base_count);
+
+    if extras == 0 {
+        return Ok(0);
+    }
 
     let cache_path = syntax_cache_path();
     if let Some(parent) = cache_path.parent() {
@@ -125,7 +134,7 @@ pub fn build_syntax_cache(syntaxes_dir: &Path) -> Result<usize, String> {
     // Write sidecar with the hash of the bundled blob this cache was built from.
     let _ = std::fs::write(cache_meta_path(), bundled_hash().to_string());
 
-    Ok(count)
+    Ok(extras)
 }
 
 /// Build the bundled syntax cache from source `.sublime-syntax` files.
@@ -181,8 +190,8 @@ pub fn load_syntax_cache() -> Option<SyntaxSet> {
         && let Ok(stored_hash) = meta.trim().parse::<u64>()
         && stored_hash != bundled_hash()
     {
-        eprintln!("Note: syntax cache was built from an older bundled base, ignoring.");
-        eprintln!("Hint: re-run `revisa build-cache` to rebuild with the latest base.");
+        eprintln!("Note: ignoring syntax cache built from an older bundled syntax set.");
+        eprintln!("Hint: re-run `revisa build-cache` to pick up your custom syntaxes again.");
         return None;
     }
 

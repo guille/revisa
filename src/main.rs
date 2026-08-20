@@ -138,9 +138,16 @@ fn main() {
 fn run_build_cache(syntaxes_dir: Option<PathBuf>) {
     let dir = syntaxes_dir.unwrap_or_else(highlight::cache::default_syntaxes_dir);
     match highlight::cache::build_syntax_cache(&dir) {
-        Ok(count) => {
+        Ok(0) => {
+            println!("Nothing to add beyond the bundled syntaxes; no cache written.");
+        }
+        Ok(extras) => {
             let cache_path = highlight::cache::syntax_cache_path();
-            println!("Wrote {count} syntaxes to {}", cache_path.display());
+            let noun = if extras == 1 { "syntax" } else { "syntaxes" };
+            println!(
+                "Wrote cache with {extras} custom {noun} to {}",
+                cache_path.display()
+            );
         }
         Err(e) => {
             eprintln!("Error building syntax cache: {e}");
