@@ -86,6 +86,30 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// (Dev only) Count search dispatches vs. applies during the initial
+    /// background diff load, driving the real AppState windowlessly.
+    #[cfg(feature = "dev-tools")]
+    Storm {
+        /// Corpus size multiplier.
+        #[arg(long, default_value_t = 4)]
+        scale: usize,
+
+        /// Corpus generator seed.
+        #[arg(long, default_value_t = 0x00C0_FFEE)]
+        seed: u64,
+
+        /// Search query to hold during the load.
+        #[arg(long, default_value = "config")]
+        query: String,
+
+        /// Compositor tick cap: no frame lands sooner than 1/fps.
+        #[arg(long, default_value_t = 60.0)]
+        fps: f64,
+
+        /// Delay before opening search, emulating a user reacting to the load.
+        #[arg(long, default_value_t = 0)]
+        delay_ms: u64,
+    },
 }
 
 fn main() {
@@ -130,6 +154,22 @@ fn main() {
                 iterations,
                 seed,
                 json,
+            });
+        }
+        #[cfg(feature = "dev-tools")]
+        Command::Storm {
+            scale,
+            seed,
+            query,
+            fps,
+            delay_ms,
+        } => {
+            bench::storm::run(&bench::storm::Options {
+                scale,
+                seed,
+                query,
+                fps,
+                delay_ms,
             });
         }
     }

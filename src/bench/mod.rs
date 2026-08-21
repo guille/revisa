@@ -7,11 +7,14 @@
 //! a few micros.
 
 mod corpus;
+pub mod storm;
 
 use std::collections::HashSet;
 use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Instant;
+
+use rayon::prelude::*;
 
 use crate::app::{self, FileDiffData};
 use crate::domain::diff::LineDiff;
@@ -148,6 +151,29 @@ pub fn run(opts: &Options) {
                 ],
             });
         }
+    }
+
+    // read-diff-par: phase 1 exactly as the app runs it (`par_iter` on the
+    // default rayon pool). This is the pre-window cost `AppState::new` pays.
+    if want("read-diff-par") {
+        let (lines, wall) = timed(iters("read-diff-par"), || {
+            let phase1: Vec<app::PairDiff> = pairs.par_iter().map(app::read_and_diff).collect();
+            let lines: usize = phase1
+                .iter()
+                .map(|p| p.old_line_count + p.new_line_count)
+                .sum();
+            black_box(&phase1);
+            lines
+        });
+        results.push(StageResult {
+            name: "read-diff-par".to_string(),
+            wall_ms: wall,
+            counters: vec![
+                ("files", pairs.len() as f64),
+                ("lines", lines as f64),
+                ("lines_per_s", rate(lines, wall)),
+            ],
+        });
     }
 
     // highlight-init: syntax dump load + theme.
@@ -289,7 +315,8 @@ pub fn run(opts: &Options) {
         }
     }
 
-    // search-snapshot: the per-dispatch corpus snapshot (finding: deep clone).
+    // search-snapshot: the per-dispatch corpus snapshot. Shares Arcs rather than
+    // copying content, so this is expected to stay flat as the corpus grows.
     if want("search") {
         let (snapshots, wall) = timed(iters("search-snapshot"), || {
             datas

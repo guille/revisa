@@ -26,6 +26,12 @@ pub struct SearchMatch {
 /// Background search results: (query, per-file matches).
 pub type BgSearchResults = Option<(String, HashMap<usize, Vec<SearchMatch>>)>;
 
+/// How long to wait after a query edit before searching.
+const QUERY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
+/// Minimum spacing between the re-searches triggered by files finishing their diff.
+/// Each pass covers the whole corpus, so coalescing arrivals costs only staleness.
+const CORPUS_THROTTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Search state, owned by `AppState`.
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)]
@@ -54,13 +60,10 @@ pub struct SearchState {
     render_map: HashMap<usize, Vec<SearchMatch>>,
     /// The query that produced current results.
     pub cached_query: String,
-    /// Set of file indices that have been searched for the current query.
-    pub searched_files: HashSet<usize>,
-    /// Timestamp when the query last changed (for debouncing).
-    pub query_changed_at: Option<std::time::Instant>,
-    /// The query string that was last dispatched to the background worker.
-    /// Used to ignore stale results when the query changes again before results arrive.
-    pub dispatched_query: String,
+    /// Deadline at which a background search should be dispatched. Armed by query
+    /// edits (debounce) and by newly loaded files (throttle), drained by
+    /// `AppState::poll_background`.
+    pub pending_dispatch_at: Option<std::time::Instant>,
     /// Whether a background search is currently in flight.
     pub searching: bool,
     /// Set of file indices whose search result groups are collapsed in the sidebar.
@@ -101,56 +104,6 @@ pub struct SearchFileGroup {
 }
 
 impl SearchState {
-    /// Update search results synchronously. Used in tests; production code
-    /// uses `dispatch_background_search` + `apply_background_results` instead.
-    #[cfg(test)]
-    pub fn update_matches(
-        &mut self,
-        diff_cache: &HashMap<usize, FileDiffData>,
-        excluded_files: &[bool],
-        selected_file: usize,
-    ) {
-        if self.query.is_empty() {
-            self.clear_results();
-            return;
-        }
-
-        let query_changed = self.query != self.cached_query;
-        if query_changed {
-            self.file_results.clear();
-            self.searched_files.clear();
-            self.cached_query.clone_from(&self.query);
-        }
-
-        let mut changed = query_changed;
-
-        for (&file_idx, data) in diff_cache {
-            if file_idx < excluded_files.len() && excluded_files[file_idx] {
-                // Remove results for newly excluded files.
-                if self.file_results.remove(&file_idx).is_some() {
-                    self.searched_files.remove(&file_idx);
-                    changed = true;
-                }
-                continue;
-            }
-            if self.searched_files.contains(&file_idx) {
-                continue;
-            }
-            let matches = compute_file_matches(
-                file_idx,
-                &SearchableFileData::from_diff_data(data),
-                &self.query,
-            );
-            self.file_results.insert(file_idx, matches);
-            self.searched_files.insert(file_idx);
-            changed = true;
-        }
-
-        if changed {
-            self.rebuild_derived(selected_file);
-        }
-    }
-
     /// Rebuild `render_map` for a new selected file (e.g., after file switch).
     pub fn rebuild_render_map(&mut self, selected_file: usize) {
         self.render_map.clear();
@@ -171,7 +124,6 @@ impl SearchState {
         self.current_match = 0;
         self.render_map.clear();
         self.cached_query.clear();
-        self.searched_files.clear();
         self.match_index_map.clear();
         self.cached_files_with_matches.clear();
         self.cached_groups.clear();
@@ -192,18 +144,26 @@ impl SearchState {
         }
         self.file_results = results;
         self.cached_query = query;
-        self.searched_files = self.file_results.keys().copied().collect();
         self.rebuild_derived(selected_file);
     }
 
-    /// Mark the query as changed, starting the debounce timer.
+    /// Arm the dispatch deadline after a query edit, superseding any pending one.
     pub fn mark_query_changed(&mut self) {
-        self.query_changed_at = Some(std::time::Instant::now());
+        self.pending_dispatch_at = Some(std::time::Instant::now() + QUERY_DEBOUNCE);
     }
 
-    /// Whether a search is in progress (debounce pending or background worker running).
+    /// Arm the dispatch deadline because newly loaded files are not covered by the
+    /// current results. Leaves an already-armed deadline alone — a steady stream of
+    /// arrivals must not keep pushing the dispatch out of reach.
+    pub fn mark_corpus_grown(&mut self) {
+        if self.pending_dispatch_at.is_none() {
+            self.pending_dispatch_at = Some(std::time::Instant::now() + CORPUS_THROTTLE);
+        }
+    }
+
+    /// Whether a search is in progress (dispatch pending or background worker running).
     pub fn is_searching(&self) -> bool {
-        self.query_changed_at.is_some() || self.searching
+        self.pending_dispatch_at.is_some() || self.searching
     }
 
     /// Navigate to the next match. Returns the target match if one exists.
@@ -619,6 +579,25 @@ mod tests {
         }
     }
 
+    /// Search every cached file and apply the results, as the background worker
+    /// and `poll_background` do in production. Sequential here; `compute_file_matches`
+    /// and `apply_background_results` are the same functions the app calls.
+    fn search_corpus(
+        state: &mut SearchState,
+        diff_cache: &HashMap<usize, FileDiffData>,
+        selected_file: usize,
+    ) {
+        let query = state.query.clone();
+        let results = diff_cache
+            .iter()
+            .map(|(&idx, data)| {
+                let data = SearchableFileData::from_diff_data(data);
+                (idx, compute_file_matches(idx, &data, &query))
+            })
+            .collect();
+        state.apply_background_results(query, results, selected_file);
+    }
+
     #[test]
     fn test_basic_search() {
         let data = make_diff_data(
@@ -813,8 +792,7 @@ mod tests {
             ),
         );
 
-        let excluded = vec![false, false];
-        state.update_matches(&diff_cache, &excluded, 0);
+        search_corpus(&mut state, &diff_cache, 0);
 
         // Should have matches in both files.
         assert_eq!(state.total_matches(), 4); // 2 per file (left+right).
@@ -833,48 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn test_excluded_files() {
-        let mut state = SearchState {
-            query: "test".into(),
-            ..Default::default()
-        };
-
-        let mut diff_cache = HashMap::new();
-        diff_cache.insert(
-            0,
-            make_diff_data(
-                vec!["test"],
-                vec!["test"],
-                vec![AlignedRow::Both {
-                    left_line: 0,
-                    right_line: 0,
-                    modified: false,
-                }],
-            ),
-        );
-        diff_cache.insert(
-            1,
-            make_diff_data(
-                vec!["test"],
-                vec!["test"],
-                vec![AlignedRow::Both {
-                    left_line: 0,
-                    right_line: 0,
-                    modified: false,
-                }],
-            ),
-        );
-
-        // Exclude file 1.
-        let excluded = vec![false, true];
-        state.update_matches(&diff_cache, &excluded, 0);
-
-        assert_eq!(state.total_matches(), 2); // Only file 0.
-        assert!(!state.file_results.contains_key(&1));
-    }
-
-    #[test]
-    fn test_incremental_search() {
+    fn test_research_covers_newly_loaded_file() {
         let mut state = SearchState {
             query: "test".into(),
             ..Default::default()
@@ -894,8 +831,7 @@ mod tests {
             ),
         );
 
-        let excluded = vec![false, false];
-        state.update_matches(&diff_cache, &excluded, 0);
+        search_corpus(&mut state, &diff_cache, 0);
         assert_eq!(state.total_matches(), 2);
 
         // Add file 1 (background thread delivered it).
@@ -911,7 +847,7 @@ mod tests {
                 }],
             ),
         );
-        state.update_matches(&diff_cache, &excluded, 0);
+        search_corpus(&mut state, &diff_cache, 0);
         assert_eq!(state.total_matches(), 4); // Now includes file 1.
     }
 
@@ -948,8 +884,7 @@ mod tests {
             ),
         );
 
-        let excluded = vec![false, false];
-        state.update_matches(&diff_cache, &excluded, 0);
+        search_corpus(&mut state, &diff_cache, 0);
 
         let files = state.files_with_matches();
         assert_eq!(files.len(), 1);

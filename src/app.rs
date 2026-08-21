@@ -292,6 +292,13 @@ pub struct AppState {
     pub sidebar_scroll_to_selected: bool,
     /// Rect of the diff view area (set after panel layout, used for scroll hit-testing).
     pub diff_rect: Option<eframe::egui::Rect>,
+    /// Instrumentation: full-corpus searches handed to the pool.
+    #[cfg(feature = "dev-tools")]
+    pub search_dispatches: u32,
+    /// Instrumentation: search results actually applied to the UI state. The gap
+    /// against `search_dispatches` is whole-corpus work computed and then discarded.
+    #[cfg(feature = "dev-tools")]
+    pub search_applies: u32,
     /// Background diff computation results channel.
     bg_results: std::sync::mpsc::Receiver<(usize, FileDiffData)>,
     /// Number of files fully computed (for progress display).
@@ -397,6 +404,10 @@ impl AppState {
             file_tree,
             sidebar_scroll_to_selected: true,
             diff_rect: None,
+            #[cfg(feature = "dev-tools")]
+            search_dispatches: 0,
+            #[cfg(feature = "dev-tools")]
+            search_applies: 0,
             bg_results,
             files_computed,
             diff_view_ctx,
@@ -653,47 +664,69 @@ impl AppState {
             }
         });
 
-        // If new diffs arrived and search is active, re-dispatch search to cover new files.
-        if had_new && self.search.open && !self.search.query.is_empty() {
-            self.dispatch_background_search();
-        }
-
-        // Check debounce timer — dispatch search if enough time has elapsed.
-        if let Some(changed_at) = self.search.query_changed_at {
-            let debounce = std::time::Duration::from_millis(200);
-            let elapsed = changed_at.elapsed();
-            if elapsed >= debounce {
-                self.search.query_changed_at = None;
-                if self.search.query.is_empty() {
-                    self.search.clear_results();
-                } else {
-                    self.dispatch_background_search();
-                }
-            } else if let Some(ctx) = &self.ctx {
-                // Schedule a repaint for when the debounce timer expires.
-                ctx.request_repaint_after(debounce.saturating_sub(elapsed));
-            }
-        }
-
-        // Collect background search results.
-        let mut bg_search = self
+        // Collect background search results. This runs before the dispatch check so
+        // that a landing result can hand straight off to a pending dispatch within
+        // the same frame — nothing else guarantees another repaint to come back for.
+        let bg_search = self
             .bg_search_results
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((query, file_results)) = bg_search.take() {
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some((query, file_results)) = bg_search {
+            #[cfg(feature = "dev-tools")]
+            {
+                self.search_applies += 1;
+            }
             self.search
                 .apply_background_results(query, file_results, self.selected_file);
             self.search
                 .rebuild_display_cache(&self.diff_cache, &self.file_pairs);
         }
+
+        // Newly arrived diffs are not covered by the current results.
+        if had_new && self.search.open && !self.search.query.is_empty() {
+            self.search.mark_corpus_grown();
+        }
+
+        if let Some(deadline) = self.search.pending_dispatch_at {
+            let now = std::time::Instant::now();
+            if now < deadline {
+                if let Some(ctx) = &self.ctx {
+                    ctx.request_repaint_after(deadline - now);
+                }
+            } else {
+                self.search.pending_dispatch_at = None;
+                if self.search.query.is_empty() {
+                    self.search.clear_results();
+                } else {
+                    // Re-arms itself if a search is still in flight.
+                    self.dispatch_background_search();
+                }
+            }
+        }
     }
 
     /// Dispatch a search to the background thread pool.
+    ///
+    /// Only one search runs at a time: overlapping passes race on the single result
+    /// slot, so the loser's whole-corpus work is discarded unread, and whichever
+    /// finishes last wins even if it snapshotted fewer files. If a search is already
+    /// in flight this arms the pending deadline instead, and the collect step in
+    /// `poll_background` picks it up as soon as the in-flight one lands.
     pub fn dispatch_background_search(&mut self) {
         use crate::domain::search::{SearchableFileData, compute_file_matches};
 
+        if self.search.searching {
+            self.search.pending_dispatch_at = Some(std::time::Instant::now());
+            return;
+        }
+
+        #[cfg(feature = "dev-tools")]
+        {
+            self.search_dispatches += 1;
+        }
+
         let query = self.search.query.clone();
-        self.search.dispatched_query.clone_from(&query);
         self.search.searching = true;
 
         // Snapshot only the data needed for searching (lightweight, no styled spans).
