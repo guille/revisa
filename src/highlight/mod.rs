@@ -216,7 +216,7 @@ impl Highlighter {
 
     /// Highlight an entire file, returning per-line syntax spans.
     pub fn highlight_file(&self, content: &str, filename: &str) -> HighlightedFile {
-        let syntax = self.detect_syntax(filename);
+        let syntax = self.detect_syntax(filename, content);
         let mut highlighter = HighlightLines::new(syntax, &self.theme);
         let mut buf = String::with_capacity(256);
         let mut lines = Vec::new();
@@ -268,11 +268,26 @@ impl Highlighter {
         HighlightedFile { lines }
     }
 
-    fn detect_syntax(&self, filename: &str) -> &SyntaxReference {
+    /// Pick a syntax for `filename`, falling back to `content`'s first line
+    /// when the name is unrecognized.
+    ///
+    /// Deliberately avoids `SyntaxSet::find_syntax_for_file`, which opens
+    /// `filename` from disk: the name here is relative to the diff root, so
+    /// that resolves against the process CWD and matches an unrelated file.
+    fn detect_syntax(&self, filename: &str, content: &str) -> &SyntaxReference {
+        let path = Path::new(filename);
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let extension = path.extension().and_then(|x| x.to_str()).unwrap_or("");
         self.syntax_set
-            .find_syntax_for_file(filename)
-            .ok()
-            .flatten()
+            .find_syntax_by_extension(name)
+            .or_else(|| self.syntax_set.find_syntax_by_extension(extension))
+            .or_else(|| {
+                content
+                    .lines()
+                    .next()
+                    .filter(|l| l.len() <= MAX_HIGHLIGHT_LINE_BYTES)
+                    .and_then(|l| self.syntax_set.find_syntax_by_first_line(l))
+            })
             .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text())
     }
 }
@@ -443,6 +458,48 @@ mod tests {
         let spans = vec![make_syntax_span(0..5, 100, 100, 100)];
         let result = compose_line(&spans, DiffBg::None, 5, [200, 200, 200, 255], test_colors());
         assert_eq!(result[0].bg, [0, 0, 0, 0]); // transparent
+    }
+
+    /// Syntax detection reads only its two arguments — never the filesystem.
+    ///
+    /// Every case below uses a path that does not exist relative to the test
+    /// CWD, so any implementation that opens `filename` (as
+    /// `SyntaxSet::find_syntax_for_file` does) fails these.
+    #[test]
+    fn test_detect_syntax_never_touches_disk() {
+        let h = Highlighter::new(None);
+        let name_of = |file: &str, content: &str| h.detect_syntax(file, content).name.clone();
+
+        // Extensionless script: detected from the shebang in `content`.
+        assert_eq!(name_of("scripts/deploy", "#!/bin/bash\necho hi\n"), "Bash");
+        assert_eq!(
+            name_of("bin/run", "#!/usr/bin/env python3\nprint(1)\n"),
+            "Python"
+        );
+        // A known extension still wins over a contradicting first line.
+        assert_eq!(name_of("src/lib.rs", "#!/bin/bash\nfn main() {}\n"), "Rust");
+        // Whole-filename match (the syntax lists "Makefile" as an extension).
+        assert_eq!(name_of("build/Makefile", "all:\n\techo hi\n"), "Makefile");
+        // Nothing to go on — plain text, not a guess.
+        assert_eq!(name_of("notes/scratch", "just some prose\n"), "Plain Text");
+    }
+
+    /// Detection follows the content, not a same-named file that happens to
+    /// exist near the process CWD. `git-revisa` is an extensionless bash
+    /// script in the crate root; tests run with CWD there.
+    #[test]
+    fn test_detect_syntax_ignores_cwd_namesake() {
+        assert!(
+            std::path::Path::new("git-revisa").exists(),
+            "this test needs an extensionless script in the crate root to act \
+             as the decoy; if git-revisa was renamed, point it at the new one",
+        );
+        let h = Highlighter::new(None);
+        // Rust content under the decoy's name must not come back as Bash.
+        assert_eq!(
+            h.detect_syntax("git-revisa", "fn main() {}\n").name,
+            "Plain Text"
+        );
     }
 
     #[test]
