@@ -195,13 +195,14 @@ fn detect_renames(pairs: &mut Vec<FilePair>, threshold: u8) {
         Some((text, lines))
     };
 
+    let pairs_ref: &[FilePair] = pairs;
     let deleted_contents: Vec<Option<(String, usize)>> = deleted_indices
-        .iter()
-        .map(|&i| read_content(&pairs[i], true))
+        .par_iter()
+        .map(|&i| read_content(&pairs_ref[i], true))
         .collect();
     let added_contents: Vec<Option<(String, usize)>> = added_indices
-        .iter()
-        .map(|&i| read_content(&pairs[i], false))
+        .par_iter()
+        .map(|&i| read_content(&pairs_ref[i], false))
         .collect();
 
     let mut matched_del = vec![false; deleted_indices.len()];
@@ -231,7 +232,7 @@ fn detect_renames(pairs: &mut Vec<FilePair>, threshold: u8) {
     // by line-hash multiset intersection (O(a + b), vs a full diff).
     let hashes_for = |contents: &[Option<(String, usize)>], matched: &[bool]| {
         contents
-            .iter()
+            .par_iter()
             .enumerate()
             .map(|(i, c)| match c {
                 Some((text, _)) if !matched[i] => Some(line_hashes(text)),
