@@ -179,34 +179,36 @@ pub(super) fn handle_input(ctx: &egui::Context, state: &mut AppState, total_rows
                 }
 
                 if kb.next_hunk.matches_strict(*key, *modifiers) {
-                    let diff_data = &state.diff_cache[&state.selected_file];
-                    let current_data_row = diff_data
-                        .fold_state
-                        .view_row_to_data_row_for_mode(state.scroll_row(), state.diff_mode);
-                    if let Some(view_row) =
-                        crate::domain::hunk::next_hunk_row(&diff_data.hunks, current_data_row)
-                            .and_then(|dr| {
-                                diff_data
-                                    .fold_state
-                                    .data_to_view_row_for_mode(dr, state.diff_mode)
-                            })
-                    {
-                        state.scroll_to_row(view_row);
+                    if let Some(diff_data) = state.diff_cache.get(&state.selected_file) {
+                        let current_data_row = diff_data
+                            .fold_state
+                            .view_row_to_data_row_for_mode(state.scroll_row(), state.diff_mode);
+                        if let Some(view_row) =
+                            crate::domain::hunk::next_hunk_row(&diff_data.hunks, current_data_row)
+                                .and_then(|dr| {
+                                    diff_data
+                                        .fold_state
+                                        .data_to_view_row_for_mode(dr, state.diff_mode)
+                                })
+                        {
+                            state.scroll_to_row(view_row);
+                        }
                     }
                 } else if kb.prev_hunk.matches_strict(*key, *modifiers) {
-                    let diff_data = &state.diff_cache[&state.selected_file];
-                    let current_data_row = diff_data
-                        .fold_state
-                        .view_row_to_data_row_for_mode(state.scroll_row(), state.diff_mode);
-                    if let Some(view_row) =
-                        crate::domain::hunk::prev_hunk_row(&diff_data.hunks, current_data_row)
-                            .and_then(|dr| {
-                                diff_data
-                                    .fold_state
-                                    .data_to_view_row_for_mode(dr, state.diff_mode)
-                            })
-                    {
-                        state.scroll_to_row(view_row);
+                    if let Some(diff_data) = state.diff_cache.get(&state.selected_file) {
+                        let current_data_row = diff_data
+                            .fold_state
+                            .view_row_to_data_row_for_mode(state.scroll_row(), state.diff_mode);
+                        if let Some(view_row) =
+                            crate::domain::hunk::prev_hunk_row(&diff_data.hunks, current_data_row)
+                                .and_then(|dr| {
+                                    diff_data
+                                        .fold_state
+                                        .data_to_view_row_for_mode(dr, state.diff_mode)
+                                })
+                        {
+                            state.scroll_to_row(view_row);
+                        }
                     }
                 } else if kb.toggle_diff_mode.matches_strict(*key, *modifiers) {
                     state.toggle_diff_mode();

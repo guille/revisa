@@ -989,21 +989,20 @@ impl AppState {
             crate::domain::fold::DiffMode::Unified => crate::domain::fold::DiffMode::SideBySide,
         };
         let scroll_row = self.scroll_row();
-        let diff_data = self
-            .diff_cache
-            .get_mut(&self.selected_file)
-            .expect("selected file always present in diff_cache");
-        let data_row = diff_data
-            .fold_state
-            .view_row_to_data_row_for_mode(scroll_row, old_mode);
-        diff_data.ensure_unified_offsets_if_needed(new_mode);
-        let new_view_row = diff_data
-            .fold_state
-            .data_to_view_row_for_mode(data_row, new_mode)
-            .unwrap_or(0);
         self.diff_mode = new_mode;
-        let line_height = self.settings.behavior.line_height;
-        self.scroll.y = new_view_row as f32 * line_height;
+        // Scroll preservation needs the diff data; skip it while the file is
+        // still computing (mode toggle is global, so it still applies).
+        if let Some(diff_data) = self.diff_cache.get_mut(&self.selected_file) {
+            let data_row = diff_data
+                .fold_state
+                .view_row_to_data_row_for_mode(scroll_row, old_mode);
+            diff_data.ensure_unified_offsets_if_needed(new_mode);
+            let new_view_row = diff_data
+                .fold_state
+                .data_to_view_row_for_mode(data_row, new_mode)
+                .unwrap_or(0);
+            self.scroll.y = new_view_row as f32 * self.settings.behavior.line_height;
+        }
         self.scroll.vy = 0.0;
         self.scroll.pending_wheel_y = 0.0;
     }
