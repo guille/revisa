@@ -25,12 +25,6 @@ pub struct FontVariants {
     pub has_bold_italic: bool,
 }
 
-/// Inline diff data for a single modified line pair.
-struct InlineDiffPair {
-    old_spans: Vec<InlineSpan>,
-    new_spans: Vec<InlineSpan>,
-}
-
 /// Compact line-indexed view over owned content. Stores the full text once
 /// and a vector of byte offsets marking line starts, avoiding per-line heap
 /// allocations entirely. Two allocations total: one for the content `String`,
@@ -1200,27 +1194,6 @@ pub fn compute_diff_from_contents_with_diff(
         highlighter.highlight_file(&new_content, filename)
     };
 
-    // Compute inline (word-level) diffs for modified line pairs.
-    // Indexed by aligned_row index for O(1) lookup and cache locality.
-    let mut inline_diffs: Vec<Option<InlineDiffPair>> =
-        (0..aligned_rows.len()).map(|_| None).collect();
-    for (row_idx, row) in aligned_rows.iter().enumerate() {
-        if let AlignedRow::Both {
-            left_line,
-            right_line,
-            modified: true,
-        } = row
-        {
-            let old_text = old_lines.get(*left_line).copied().unwrap_or("");
-            let new_text = new_lines.get(*right_line).copied().unwrap_or("");
-            let (old_spans, new_spans) = diff_inline(old_text, new_text);
-            inline_diffs[row_idx] = Some(InlineDiffPair {
-                old_spans,
-                new_spans,
-            });
-        }
-    }
-
     let default_fg = highlighter.default_fg();
 
     // Pre-compute styled spans for all aligned rows.
@@ -1228,15 +1201,19 @@ pub fn compute_diff_from_contents_with_diff(
     let mut left_styled = StyledRows::with_row_capacity(aligned_rows.len());
     let mut right_styled = StyledRows::with_row_capacity(aligned_rows.len());
 
-    for (row_idx, row) in aligned_rows.iter().enumerate() {
+    for row in &aligned_rows {
         match row {
             AlignedRow::Both {
                 left_line,
                 right_line,
                 modified,
             } => {
-                // Left side.
                 let old_text = old_lines.get(*left_line).copied().unwrap_or("");
+                let new_text = new_lines.get(*right_line).copied().unwrap_or("");
+                // Word-level spans for a changed pair; both sides below use them.
+                let inline = modified.then(|| diff_inline(old_text, new_text));
+
+                // Left side.
                 let old_syntax = old_highlight
                     .lines
                     .get(*left_line)
@@ -1253,10 +1230,10 @@ pub fn compute_diff_from_contents_with_diff(
                     default_fg,
                     diff_bg_colors,
                 );
-                if let Some(pair) = modified.then(|| inline_diffs[row_idx].as_ref()).flatten() {
+                if let Some((old_spans, _)) = inline.as_ref() {
                     apply_inline_highlights_inplace(
                         &mut styled_l,
-                        &pair.old_spans,
+                        old_spans,
                         true,
                         inline_old_bg,
                         inline_new_bg,
@@ -1265,7 +1242,6 @@ pub fn compute_diff_from_contents_with_diff(
                 left_styled.push_row(&styled_l, &mut interner);
 
                 // Right side.
-                let new_text = new_lines.get(*right_line).copied().unwrap_or("");
                 let new_syntax = new_highlight
                     .lines
                     .get(*right_line)
@@ -1282,10 +1258,10 @@ pub fn compute_diff_from_contents_with_diff(
                     default_fg,
                     diff_bg_colors,
                 );
-                if let Some(pair) = modified.then(|| inline_diffs[row_idx].as_ref()).flatten() {
+                if let Some((_, new_spans)) = inline.as_ref() {
                     apply_inline_highlights_inplace(
                         &mut styled_r,
-                        &pair.new_spans,
+                        new_spans,
                         false,
                         inline_old_bg,
                         inline_new_bg,
