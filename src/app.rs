@@ -1002,22 +1002,25 @@ impl AppState {
     }
 
     /// Mark current file as reviewed and select next unreviewed file.
+    /// With nothing left to advance to, re-surface the review-complete popup.
     pub fn mark_reviewed_and_next(&mut self) {
         let path = self.selected_pair().relative_path.clone();
         self.review_state.mark_reviewed(&path);
-        self.refresh_review_counts();
-        if let Some(next) = self
+        let next = self
             .review_state
             .next_unreviewed_after_excluding(&path, &self.excluded_dirs)
-        {
-            let next = next.clone();
-            if let Some(idx) = self
+            .cloned();
+        if next.is_none() {
+            self.review_complete.dismissed = false;
+        }
+        self.refresh_review_counts();
+        if let Some(next) = next
+            && let Some(idx) = self
                 .file_pairs
                 .iter()
                 .position(|fp| fp.relative_path == next)
-            {
-                self.select_file(idx);
-            }
+        {
+            self.select_file(idx);
         }
     }
 
@@ -1713,6 +1716,29 @@ mod tests {
         let before = s.selected_file;
         s.mark_reviewed_and_next();
         assert_eq!(s.selected_file, before);
+    }
+
+    #[test]
+    fn mark_reviewed_and_next_retriggers_dismissed_popup() {
+        let mut s = make_state(&["a.rs", "b.rs"]);
+        s.review_state.mark_reviewed(Path::new("a.rs"));
+        s.review_state.mark_reviewed(Path::new("b.rs"));
+        s.refresh_review_counts();
+        // Popup dismissed via "Go back".
+        s.review_complete.show = false;
+        s.review_complete.dismissed = true;
+
+        s.mark_reviewed_and_next();
+        assert!(s.review_complete.show);
+        assert!(!s.review_complete.dismissed);
+    }
+
+    #[test]
+    fn mark_reviewed_and_next_keeps_popup_closed_while_files_remain() {
+        let mut s = make_state(&["a.rs", "b.rs"]);
+        s.mark_reviewed_and_next();
+        assert_eq!(s.selected_file, 1);
+        assert!(!s.review_complete.show);
     }
 
     #[test]
