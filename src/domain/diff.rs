@@ -2,7 +2,7 @@ use similar::{ChangeTag, TextDiff};
 use std::ops::Range;
 
 /// Result of diffing two files at the line level.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct LineDiff {
     /// The operations describing how the old text maps to the new text.
     pub ops: Vec<DiffOp>,

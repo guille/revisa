@@ -264,7 +264,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                         let reviewed = state
                             .review_state
                             .is_reviewed(&state.file_pairs[file_idx].relative_path);
-                        let stat = state.diff_stats.get(file_idx).copied();
+                        let stat = state.diff_stats.get(file_idx).copied().flatten();
                         let is_selected = file_idx == selected;
 
                         // Reserve row space first, so we know the rect for bg painting.

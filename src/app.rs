@@ -275,6 +275,9 @@ pub struct ReviewCompletePopup {
     pub was_open: bool,
 }
 
+/// Force-compute result: full diff data plus the stat phase 1 may have skipped.
+type ForceComputeResult = (FileDiffData, Option<DiffStat>);
+
 /// Top-level application state shared between all UI panels.
 #[allow(clippy::struct_excessive_bools)]
 pub struct AppState {
@@ -293,7 +296,7 @@ pub struct AppState {
     /// Whether the help overlay is visible.
     pub help_open: bool,
     /// Per-file diff statistics (eagerly computed at startup).
-    pub diff_stats: Vec<DiffStat>,
+    pub diff_stats: Vec<Option<DiffStat>>,
     /// File tree for sidebar rendering.
     pub file_tree: Vec<TreeNode>,
     /// Cached flattened tree (invalidated on toggle_dir).
@@ -370,7 +373,7 @@ pub struct AppState {
     /// File indices currently being force-computed (prevents duplicate spawns).
     pub force_computing: HashSet<usize>,
     /// Receivers for force-computed diff results (file index + one-shot channel).
-    force_receivers: Vec<(usize, std::sync::mpsc::Receiver<FileDiffData>)>,
+    force_receivers: Vec<(usize, std::sync::mpsc::Receiver<ForceComputeResult>)>,
 }
 
 impl AppState {
@@ -383,13 +386,13 @@ impl AppState {
         settings: crate::domain::settings::Settings,
         diff_view_ctx: crate::ui::diff_view::DiffViewCtx,
         diff_cache: HashMap<usize, FileDiffData>,
-        diff_stats: Vec<DiffStat>,
+        diff_stats: Vec<Option<DiffStat>>,
         bg_results: std::sync::mpsc::Receiver<(usize, FileDiffData)>,
         files_computed: usize,
         ctx: Option<eframe::egui::Context>,
     ) -> Self {
-        let total_added: usize = diff_stats.iter().map(|s| s.added).sum();
-        let total_deleted: usize = diff_stats.iter().map(|s| s.deleted).sum();
+        let total_added: usize = diff_stats.iter().flatten().map(|s| s.added).sum();
+        let total_deleted: usize = diff_stats.iter().flatten().map(|s| s.deleted).sum();
         let file_tree = build_tree(
             &file_pairs
                 .iter()
@@ -472,9 +475,13 @@ impl AppState {
 
         // Phase 1: Read all files and compute diffs in parallel (one pass).
         // Results are cached for reuse in phases 2 & 3.
-        let phase1: Vec<PairDiff> = file_pairs.par_iter().map(read_and_diff).collect();
+        let max_lines = settings.behavior.max_diff_lines;
+        let phase1: Vec<PairDiff> = file_pairs
+            .par_iter()
+            .map(|p| read_and_diff(p, max_lines))
+            .collect();
 
-        let diff_stats: Vec<DiffStat> = phase1.iter().map(|p| p.stat).collect();
+        let diff_stats: Vec<Option<DiffStat>> = phase1.iter().map(|p| p.stat).collect();
 
         // Phase 2: Compute full diff data for file 0 using cached contents + diff.
         let mut diff_cache = HashMap::new();
@@ -511,7 +518,6 @@ impl AppState {
 
         // Phase 3: Spawn background thread to compute remaining files using cached data.
         // Pre-filter: create placeholders for large and binary files so the bg thread skips them.
-        let max_lines = settings.behavior.max_diff_lines;
         for (i, entry) in cached_contents.iter_mut().enumerate().skip(1) {
             if let Some(p) = entry.as_ref() {
                 let (old_lines, new_lines) = (p.old_line_count, p.new_line_count);
@@ -612,7 +618,9 @@ impl AppState {
         let ctx = self.ctx.clone();
 
         rayon::spawn(move || {
-            let read = read_and_diff(&pair);
+            // Unlimited: force-compute exists to diff files over the limit.
+            let read = read_and_diff(&pair, 0);
+            let stat = read.stat;
             let data = if read.binary {
                 FileDiffData::binary_placeholder(
                     settings.behavior.fold_context,
@@ -636,7 +644,7 @@ impl AppState {
                     true, // skip size guard
                 )
             };
-            let _ = tx.send(data);
+            let _ = tx.send((data, stat));
             if let Some(ctx) = ctx {
                 ctx.request_repaint();
             }
@@ -657,13 +665,19 @@ impl AppState {
         }
 
         // Poll force-compute receivers (one-shot channels for "Calculate anyway").
+        let mut stats_backfilled = false;
         self.force_receivers.retain(|(idx, rx)| {
             match rx.try_recv() {
-                Ok(data) => {
+                Ok((data, stat)) => {
                     had_new = true;
                     self.force_computing.remove(idx);
                     self.diff_cache.insert(*idx, data);
                     self.galley_cache.borrow_mut().invalidate_file(*idx);
+                    // Backfill the stat phase 1 skipped for over-limit files.
+                    if stat.is_some() && self.diff_stats.get(*idx).is_some_and(Option::is_none) {
+                        self.diff_stats[*idx] = stat;
+                        stats_backfilled = true;
+                    }
                     false // receiver consumed, remove
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => true, // still pending
@@ -673,6 +687,9 @@ impl AppState {
                 }
             }
         });
+        if stats_backfilled {
+            self.refresh_review_counts();
+        }
 
         // Collect background search results. This runs before the dispatch check so
         // that a landing result can hand straight off to a pending dispatch within
@@ -771,8 +788,11 @@ impl AppState {
     pub fn new_for_test(file_pairs: Vec<FilePair>, review_state: ReviewState) -> Self {
         let highlighter = Arc::new(Highlighter::new(None));
         let defaults = crate::domain::settings::Settings::default();
-        let phase1: Vec<PairDiff> = file_pairs.iter().map(read_and_diff).collect();
-        let diff_stats: Vec<DiffStat> = phase1.iter().map(|p| p.stat).collect();
+        let phase1: Vec<PairDiff> = file_pairs
+            .iter()
+            .map(|p| read_and_diff(p, defaults.behavior.max_diff_lines))
+            .collect();
+        let diff_stats: Vec<Option<DiffStat>> = phase1.iter().map(|p| p.stat).collect();
         let mut diff_cache = HashMap::new();
         for (i, read) in phase1.into_iter().enumerate() {
             let data = if read.binary {
@@ -844,7 +864,9 @@ impl AppState {
         let mut added = 0usize;
         let mut deleted = 0usize;
         for (i, stat) in self.diff_stats.iter().enumerate() {
-            if !self.is_file_excluded(i) {
+            if let Some(stat) = stat
+                && !self.is_file_excluded(i)
+            {
                 added += stat.added;
                 deleted += stat.deleted;
             }
@@ -1139,7 +1161,9 @@ fn read_text_file(path: &Path) -> Option<String> {
 /// [`compute_diff_from_contents_with_diff`], which turns it into the rendered
 /// [`FileDiffData`].
 pub struct PairDiff {
-    pub stat: DiffStat,
+    /// `None` when the diff was skipped (line count over `max_lines`);
+    /// `diff` is empty in that case.
+    pub stat: Option<DiffStat>,
     pub old_content: String,
     pub new_content: String,
     pub diff: LineDiff,
@@ -1153,7 +1177,10 @@ pub struct PairDiff {
 }
 
 /// Read both sides of a pair and compute their line diff and stats.
-pub fn read_and_diff(pair: &FilePair) -> PairDiff {
+/// With `max_lines > 0`, pairs over the limit skip the diff entirely — they
+/// only ever render a too-large placeholder, so diffing them would buy the
+/// stat badge at an unbounded pre-window cost. Pass 0 to always diff.
+pub fn read_and_diff(pair: &FilePair, max_lines: usize) -> PairDiff {
     let old_result = pair.left_path.as_ref().map(|p| read_text_file(p));
     let new_result = pair.right_path.as_ref().map(|p| read_text_file(p));
 
@@ -1166,8 +1193,14 @@ pub fn read_and_diff(pair: &FilePair) -> PairDiff {
     let old_line_count = old_content.lines().count();
     let new_line_count = new_content.lines().count();
 
-    let diff = diff_lines(&old_content, &new_content);
-    let stat = diff_stat(&diff.ops);
+    let over_limit = max_lines > 0 && (old_line_count > max_lines || new_line_count > max_lines);
+    let (diff, stat) = if over_limit {
+        (LineDiff::default(), None)
+    } else {
+        let diff = diff_lines(&old_content, &new_content);
+        let stat = diff_stat(&diff.ops);
+        (diff, Some(stat))
+    };
     PairDiff {
         stat,
         old_content,

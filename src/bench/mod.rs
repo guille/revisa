@@ -126,11 +126,12 @@ pub fn run(opts: &Options) {
             let data: Vec<(String, String, bool)> = pairs
                 .iter()
                 .map(|p| {
-                    let read = app::read_and_diff(p);
+                    // Unlimited: this stage measures raw read+diff throughput.
+                    let read = app::read_and_diff(p, 0);
                     black_box(&read.diff);
                     lines += read.old_line_count + read.new_line_count;
-                    added += read.stat.added;
-                    deleted += read.stat.deleted;
+                    added += read.stat.map_or(0, |s| s.added);
+                    deleted += read.stat.map_or(0, |s| s.deleted);
                     (read.old_content, read.new_content, read.binary)
                 })
                 .collect();
@@ -154,10 +155,15 @@ pub fn run(opts: &Options) {
     }
 
     // read-diff-par: phase 1 exactly as the app runs it (`par_iter` on the
-    // default rayon pool). This is the pre-window cost `AppState::new` pays.
+    // default rayon pool, default `max_diff_lines` guard). This is the
+    // pre-window cost `AppState::new` pays.
     if want("read-diff-par") {
+        let max_lines = settings.behavior.max_diff_lines;
         let (lines, wall) = timed(iters("read-diff-par"), || {
-            let phase1: Vec<app::PairDiff> = pairs.par_iter().map(app::read_and_diff).collect();
+            let phase1: Vec<app::PairDiff> = pairs
+                .par_iter()
+                .map(|p| app::read_and_diff(p, max_lines))
+                .collect();
             let lines: usize = phase1
                 .iter()
                 .map(|p| p.old_line_count + p.new_line_count)

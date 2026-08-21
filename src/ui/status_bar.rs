@@ -80,7 +80,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, font_size: f32) {
     }
 
     // Inline diff stats.
-    if let Some(stat) = state.diff_stats.get(state.selected_file)
+    if let Some(stat) = state.diff_stats.get(state.selected_file).copied().flatten()
         && (stat.added > 0 || stat.deleted > 0)
     {
         ns_label(ui, egui::RichText::new(" · ").color(muted).size(font_size));
