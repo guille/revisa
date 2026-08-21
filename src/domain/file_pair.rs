@@ -1,5 +1,5 @@
 use crate::domain::settings::RenameLimit;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -70,12 +70,13 @@ pub fn format_rwx(bits: u32) -> String {
     format!("{r}{w}{x}")
 }
 
-/// Read the Unix permission bits for a file (e.g. `0o755`), excluding file type bits.
-fn file_mode(path: &Path) -> Option<u32> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::metadata(path)
-        .ok()
-        .map(|m| m.permissions().mode() & 0o7777)
+/// What the directory walk already learned about a file. Carried through to
+/// pairing so neither the mode nor the size needs a second stat.
+#[derive(Debug, Clone, Copy)]
+struct EntryMeta {
+    /// Unix permission bits (e.g. `0o755`), excluding file type bits.
+    mode: u32,
+    len: u64,
 }
 
 /// Walk two directory trees and pair files by relative path.
@@ -89,45 +90,43 @@ pub fn walk_and_pair(
     filter_unchanged: bool,
     rename_limit: RenameLimit,
 ) -> io::Result<Vec<FilePair>> {
-    let left_files = collect_relative_paths(left_dir)?;
-    let right_files = collect_relative_paths(right_dir)?;
+    let left_files = collect_entries(left_dir)?;
+    let right_files = collect_entries(right_dir)?;
 
-    let all_paths: BTreeSet<&PathBuf> = left_files.iter().chain(right_files.iter()).collect();
+    let all_paths: BTreeSet<&PathBuf> = left_files.keys().chain(right_files.keys()).collect();
 
     let mut pairs = Vec::new();
 
     for rel_path in all_paths {
-        let in_left = left_files.contains(rel_path);
-        let in_right = right_files.contains(rel_path);
-
-        let (kind, left_path, right_path, left_mode, right_mode) = match (in_left, in_right) {
-            (true, true) => {
-                let lp = left_dir.join(rel_path);
-                let rp = right_dir.join(rel_path);
-                if filter_unchanged {
-                    let (identical, lm, rm) = compare_files(&lp, &rp)?;
-                    if identical && lm == rm {
+        let (kind, left_path, right_path, left_mode, right_mode) =
+            match (left_files.get(rel_path), right_files.get(rel_path)) {
+                (Some(lm), Some(rm)) => {
+                    let lp = left_dir.join(rel_path);
+                    let rp = right_dir.join(rel_path);
+                    if filter_unchanged
+                        && lm.mode == rm.mode
+                        && contents_identical(&lp, &rp, lm.len, rm.len)?
+                    {
                         continue;
                     }
-                    (FileChangeKind::Modified, Some(lp), Some(rp), lm, rm)
-                } else {
-                    let lm = file_mode(&lp);
-                    let rm = file_mode(&rp);
-                    (FileChangeKind::Modified, Some(lp), Some(rp), lm, rm)
+                    (
+                        FileChangeKind::Modified,
+                        Some(lp),
+                        Some(rp),
+                        Some(lm.mode),
+                        Some(rm.mode),
+                    )
                 }
-            }
-            (true, false) => {
-                let lp = left_dir.join(rel_path);
-                let lm = file_mode(&lp);
-                (FileChangeKind::Deleted, Some(lp), None, lm, None)
-            }
-            (false, true) => {
-                let rp = right_dir.join(rel_path);
-                let rm = file_mode(&rp);
-                (FileChangeKind::Added, None, Some(rp), None, rm)
-            }
-            (false, false) => unreachable!(),
-        };
+                (Some(lm), None) => {
+                    let lp = left_dir.join(rel_path);
+                    (FileChangeKind::Deleted, Some(lp), None, Some(lm.mode), None)
+                }
+                (None, Some(rm)) => {
+                    let rp = right_dir.join(rel_path);
+                    (FileChangeKind::Added, None, Some(rp), None, Some(rm.mode))
+                }
+                (None, None) => unreachable!(),
+            };
 
         pairs.push(FilePair {
             relative_path: rel_path.clone(),
@@ -457,9 +456,10 @@ fn similarity_from_matches(matches: usize, total_lines: usize) -> u8 {
     ((2 * matches * 100) / total_lines).min(100) as u8
 }
 
-/// Recursively collect all file paths relative to `root`.
-fn collect_relative_paths(root: &Path) -> io::Result<BTreeSet<PathBuf>> {
-    let mut result = BTreeSet::new();
+/// Recursively collect all files relative to `root`, with the metadata the
+/// walk had to stat for anyway.
+fn collect_entries(root: &Path) -> io::Result<BTreeMap<PathBuf, EntryMeta>> {
+    let mut result = BTreeMap::new();
     let mut visited_dirs = HashSet::new();
     // Track the root's canonical path to detect symlink loops.
     let canonical_root = fs::canonicalize(root)
@@ -472,9 +472,11 @@ fn collect_relative_paths(root: &Path) -> io::Result<BTreeSet<PathBuf>> {
 fn walk_dir_recursive(
     root: &Path,
     current: &Path,
-    result: &mut BTreeSet<PathBuf>,
+    result: &mut BTreeMap<PathBuf, EntryMeta>,
     visited_dirs: &mut HashSet<PathBuf>,
 ) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
     let entries = match fs::read_dir(current) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -511,7 +513,9 @@ fn walk_dir_recursive(
 
         if metadata.is_dir() {
             // Detect symlink loops: only canonicalize if entry is a symlink.
-            let is_symlink = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+            // `entry.file_type()` does not follow the link and answers from the
+            // dirent on Linux; `metadata` above did follow it, so it cannot.
+            let is_symlink = entry.file_type().is_ok_and(|t| t.is_symlink());
             if is_symlink {
                 let canonical = fs::canonicalize(&path)
                     .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
@@ -522,31 +526,30 @@ fn walk_dir_recursive(
             walk_dir_recursive(root, &path, result, visited_dirs)?;
         } else if metadata.is_file() {
             let rel = path.strip_prefix(root).expect("path should be under root");
-            result.insert(rel.to_path_buf());
+            result.insert(
+                rel.to_path_buf(),
+                EntryMeta {
+                    mode: metadata.permissions().mode() & 0o7777,
+                    len: metadata.len(),
+                },
+            );
         }
     }
 
     Ok(())
 }
 
-/// Compare two files: returns (content_identical, left_mode, right_mode).
-fn compare_files(a: &Path, b: &Path) -> io::Result<(bool, Option<u32>, Option<u32>)> {
-    use std::os::unix::fs::PermissionsExt;
-    let meta_a =
-        fs::metadata(a).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", a.display())))?;
-    let meta_b =
-        fs::metadata(b).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", b.display())))?;
-    let mode_a = Some(meta_a.permissions().mode() & 0o7777);
-    let mode_b = Some(meta_b.permissions().mode() & 0o7777);
-    // Fast path: different sizes means different content.
-    if meta_a.len() != meta_b.len() {
-        return Ok((false, mode_a, mode_b));
+/// Whether two files have identical contents. Sizes come from the walk; a
+/// mismatch settles it without reading either file.
+fn contents_identical(a: &Path, b: &Path, len_a: u64, len_b: u64) -> io::Result<bool> {
+    if len_a != len_b {
+        return Ok(false);
     }
     let content_a =
         fs::read(a).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", a.display())))?;
     let content_b =
         fs::read(b).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", b.display())))?;
-    Ok((content_a == content_b, mode_a, mode_b))
+    Ok(content_a == content_b)
 }
 
 #[cfg(test)]
@@ -587,6 +590,23 @@ mod tests {
             setup_dirs(&[("foo.rs", "fn main() {}")], &[("foo.rs", "fn main() {}")]);
         let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn test_mode_only_change_is_not_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let (left, right) = setup_dirs(&[("foo.sh", "#!/bin/sh\n")], &[("foo.sh", "#!/bin/sh\n")]);
+        fs::set_permissions(
+            right.path().join("foo.sh"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].kind, FileChangeKind::Modified);
+        assert_eq!(pairs[0].right_mode, Some(0o755));
+        assert_eq!(pairs[0].mode_change().map(|(_, new)| new), Some(0o755));
     }
 
     #[test]
