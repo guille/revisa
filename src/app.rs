@@ -74,9 +74,14 @@ impl LineIndex {
         }
     }
 
+    /// The full content this index was built over.
+    #[inline]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
     /// Number of lines.
     #[inline]
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.offsets.len()
     }
@@ -88,23 +93,28 @@ impl LineIndex {
     }
 
     /// Get line text by 0-based index. Returns `None` if out of bounds.
+    ///
+    /// Matches `str::lines`, which drops the `\r` of a `\r\n` pair but keeps a
+    /// `\r` that ends the content without a newline after it. Everything that
+    /// styles a line measures it with `str::lines`, so a longer answer here
+    /// would put bytes on screen that no span covers.
     #[inline]
     pub fn get(&self, idx: usize) -> Option<&str> {
         if idx >= self.offsets.len() {
             return None;
         }
         let start = self.offsets[idx] as usize;
-        let end = if idx + 1 < self.offsets.len() {
+        let (mut end, newline_terminated) = if idx + 1 < self.offsets.len() {
             // Next line start minus 1 (the '\n')
-            self.offsets[idx + 1] as usize - 1
+            (self.offsets[idx + 1] as usize - 1, true)
+        } else if self.trailing_newline {
+            (self.content.len() - 1, true)
         } else {
-            // Last line: content may or may not end with '\n'
-            if self.trailing_newline {
-                self.content.len() - 1
-            } else {
-                self.content.len()
-            }
+            (self.content.len(), false)
         };
+        if newline_terminated && end > start && self.content.as_bytes()[end - 1] == b'\r' {
+            end -= 1;
+        }
         Some(&self.content[start..end])
     }
 
@@ -1194,9 +1204,10 @@ pub fn compute_diff_from_contents_with_diff(
     let fold_rh = settings.behavior.fold_row_height;
     let max_lines = settings.behavior.max_diff_lines;
 
-    // Collect lines once for both the size guard and later use.
-    let old_lines: Vec<&str> = old_content.lines().collect();
-    let new_lines: Vec<&str> = new_content.lines().collect();
+    // Index both sides up front: this is the one place that decides where a
+    // line starts and ends, and it is the same index `FileDiffData` keeps.
+    let old_lines = LineIndex::new(old_content);
+    let new_lines = LineIndex::new(new_content);
 
     // Size guard: skip expensive computation for very large files.
     if !skip_size_guard
@@ -1211,19 +1222,20 @@ pub fn compute_diff_from_contents_with_diff(
         return FileDiffData::too_large_placeholder(&msg, fold_ctx, fold_exp, fold_rh);
     }
 
-    let diff = pre_diff.unwrap_or_else(|| diff_lines(&old_content, &new_content));
+    let (old_content, new_content) = (old_lines.content(), new_lines.content());
+    let diff = pre_diff.unwrap_or_else(|| diff_lines(old_content, new_content));
     let aligned_rows = build_aligned_rows(&diff.ops);
     let hunks = extract_hunks(&aligned_rows, &diff.ops, HUNK_CONTEXT);
 
     let old_highlight = if old_content.is_empty() {
         Highlighter::empty_file()
     } else {
-        highlighter.highlight_file(&old_content, old_filename)
+        highlighter.highlight_file(old_content, old_filename)
     };
     let new_highlight = if new_content.is_empty() {
         Highlighter::empty_file()
     } else {
-        highlighter.highlight_file(&new_content, filename)
+        highlighter.highlight_file(new_content, filename)
     };
 
     let default_fg = highlighter.default_fg();
@@ -1240,8 +1252,8 @@ pub fn compute_diff_from_contents_with_diff(
                 right_line,
                 modified,
             } => {
-                let old_text = old_lines.get(*left_line).copied().unwrap_or("");
-                let new_text = new_lines.get(*right_line).copied().unwrap_or("");
+                let old_text = old_lines.line(*left_line);
+                let new_text = new_lines.line(*right_line);
                 // Word-level spans for a changed pair; both sides below use them.
                 let inline = modified.then(|| diff_inline(old_text, new_text));
 
@@ -1302,7 +1314,7 @@ pub fn compute_diff_from_contents_with_diff(
                 right_styled.push_row(&styled_r, &mut interner);
             }
             AlignedRow::LeftOnly { left_line } => {
-                let old_text = old_lines.get(*left_line).copied().unwrap_or("");
+                let old_text = old_lines.line(*left_line);
                 let old_syntax = old_highlight
                     .lines
                     .get(*left_line)
@@ -1320,7 +1332,7 @@ pub fn compute_diff_from_contents_with_diff(
                 right_styled.push_row(&[], &mut interner);
             }
             AlignedRow::RightOnly { right_line } => {
-                let new_text = new_lines.get(*right_line).copied().unwrap_or("");
+                let new_text = new_lines.line(*right_line);
                 let new_syntax = new_highlight
                     .lines
                     .get(*right_line)
@@ -1343,8 +1355,8 @@ pub fn compute_diff_from_contents_with_diff(
     let fold_state = FoldState::new(aligned_rows.len(), &hunks, fold_ctx, fold_exp, fold_rh);
 
     FileDiffData {
-        old_lines: Arc::new(LineIndex::new(old_content)),
-        new_lines: Arc::new(LineIndex::new(new_content)),
+        old_lines: Arc::new(old_lines),
+        new_lines: Arc::new(new_lines),
         aligned_rows: Arc::new(aligned_rows),
         hunks,
         left_styled,
@@ -1914,13 +1926,37 @@ mod tests {
 
     #[test]
     fn line_index_matches_str_lines() {
-        let content = "first\nsecond\nthird\nfourth";
-        let idx = LineIndex::new(content.to_string());
-        let expected: Vec<&str> = content.lines().collect();
-        for (i, exp) in expected.iter().enumerate() {
-            assert_eq!(idx.line(i), *exp, "mismatch at line {i}");
+        // Everything that styles a line measures it with `str::lines`, while
+        // rendering and search read it back through `LineIndex`. The two must
+        // agree byte for byte or spans stop lining up with the text they cover.
+        let cases = [
+            "first\nsecond\nthird\nfourth",
+            "first\nsecond\nthird\n",
+            // CRLF: the \r belongs to the terminator, not the line.
+            "first\r\nsecond\r\n",
+            "first\r\nsecond\r\nthird",
+            // A \r that ends the content with no newline after it is content,
+            // and `str::lines` keeps it. Shortening it here would leave the
+            // final span reaching past the end of the line and panic the
+            // layout builder.
+            "first\r\nsecond\r",
+            "solo\r",
+            // Blank CRLF lines, and mixed endings in one file.
+            "\r\n\r\n",
+            "unix\ndos\r\nunix\n",
+            // Degenerate inputs.
+            "",
+            "\n",
+            "\r",
+        ];
+        for content in cases {
+            let idx = LineIndex::new((*content).to_string());
+            let expected: Vec<&str> = content.lines().collect();
+            assert_eq!(idx.len(), expected.len(), "line count for {content:?}");
+            for (i, exp) in expected.iter().enumerate() {
+                assert_eq!(idx.line(i), *exp, "line {i} of {content:?}");
+            }
         }
-        assert_eq!(idx.len(), expected.len());
     }
 
     /// The `AppState::new` pre-filter, which substitutes placeholders for
