@@ -89,7 +89,14 @@ pub fn run(opts: &Options) {
     // walk: directory scan + pairing + rename detection.
     file_pair::RENAME_DIFFS.store(0, std::sync::atomic::Ordering::Relaxed);
     let (pairs, wall) = timed(iters("walk"), || {
-        file_pair::walk_and_pair(&corpus.left, &corpus.right, false).unwrap_or_else(|e| {
+        // Unlimited: the bench measures the detection algorithm itself.
+        file_pair::walk_and_pair(
+            &corpus.left,
+            &corpus.right,
+            false,
+            crate::domain::settings::RenameLimit::Fixed(0),
+        )
+        .unwrap_or_else(|e| {
             eprintln!("Error scanning corpus: {e}");
             std::process::exit(1);
         })
@@ -116,12 +123,12 @@ pub fn run(opts: &Options) {
             let data: Vec<(String, String, bool)> = pairs
                 .iter()
                 .map(|p| {
-                    let (stat, old, new, diff, is_binary) = app::read_and_diff(p);
-                    black_box(&diff);
-                    lines += count_lines(&old) + count_lines(&new);
-                    added += stat.added;
-                    deleted += stat.deleted;
-                    (old, new, is_binary)
+                    let read = app::read_and_diff(p);
+                    black_box(&read.diff);
+                    lines += read.old_line_count + read.new_line_count;
+                    added += read.stat.added;
+                    deleted += read.stat.deleted;
+                    (read.old_content, read.new_content, read.binary)
                 })
                 .collect();
             (data, lines, added, deleted)

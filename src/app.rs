@@ -457,26 +457,22 @@ impl AppState {
 
         // Phase 1: Read all files and compute diffs in parallel (one pass).
         // Results are cached for reuse in phases 2 & 3.
-        let phase1: Vec<(DiffStat, String, String, LineDiff, bool)> =
-            file_pairs.par_iter().map(read_and_diff).collect();
+        let phase1: Vec<PairDiff> = file_pairs.par_iter().map(read_and_diff).collect();
 
-        let diff_stats: Vec<DiffStat> = phase1.iter().map(|(s, _, _, _, _)| *s).collect();
+        let diff_stats: Vec<DiffStat> = phase1.iter().map(|p| p.stat).collect();
 
         // Phase 2: Compute full diff data for file 0 using cached contents + diff.
         let mut diff_cache = HashMap::new();
         let fold_ctx = settings.behavior.fold_context;
         let fold_exp = settings.behavior.fold_expand_step;
         let fold_rh = settings.behavior.fold_row_height;
-        let mut cached_contents: Vec<Option<(String, String, LineDiff, bool)>> = phase1
-            .into_iter()
-            .map(|(_, old, new, diff, bin)| Some((old, new, diff, bin)))
-            .collect();
+        let mut cached_contents: Vec<Option<PairDiff>> = phase1.into_iter().map(Some).collect();
 
         if !file_pairs.is_empty() {
-            let (old, new, diff, is_binary) = cached_contents[0]
+            let first = cached_contents[0]
                 .take()
                 .expect("phase 1 populated entry 0");
-            let data = if is_binary {
+            let data = if first.binary {
                 FileDiffData::binary_placeholder(fold_ctx, fold_exp, fold_rh)
             } else {
                 let filename = file_pairs[0].relative_path.to_string_lossy();
@@ -485,9 +481,9 @@ impl AppState {
                     .as_ref()
                     .map_or_else(|| filename.clone(), |p| p.to_string_lossy());
                 compute_diff_from_contents_with_diff(
-                    old,
-                    new,
-                    Some(diff),
+                    first.old_content,
+                    first.new_content,
+                    Some(first.diff),
                     &filename,
                     &old_filename,
                     &highlighter,
@@ -502,26 +498,23 @@ impl AppState {
         // Pre-filter: create placeholders for large and binary files so the bg thread skips them.
         let max_lines = settings.behavior.max_diff_lines;
         for (i, entry) in cached_contents.iter_mut().enumerate().skip(1) {
-            if let Some((old, new, _, is_binary)) = entry.as_ref() {
-                if *is_binary {
+            if let Some(p) = entry.as_ref() {
+                let (old_lines, new_lines) = (p.old_line_count, p.new_line_count);
+                if p.binary {
                     diff_cache.insert(
                         i,
                         FileDiffData::binary_placeholder(fold_ctx, fold_exp, fold_rh),
                     );
                     *entry = None;
-                } else if max_lines > 0 {
-                    let old_lines = old.lines().count();
-                    let new_lines = new.lines().count();
-                    if old_lines > max_lines || new_lines > max_lines {
-                        let msg = format!(
-                            "File too large for diff ({old_lines} / {new_lines} lines, limit {max_lines})",
-                        );
-                        diff_cache.insert(
-                            i,
-                            FileDiffData::too_large_placeholder(&msg, fold_ctx, fold_exp, fold_rh),
-                        );
-                        *entry = None;
-                    }
+                } else if max_lines > 0 && (old_lines > max_lines || new_lines > max_lines) {
+                    let msg = format!(
+                        "File too large for diff ({old_lines} / {new_lines} lines, limit {max_lines})",
+                    );
+                    diff_cache.insert(
+                        i,
+                        FileDiffData::too_large_placeholder(&msg, fold_ctx, fold_exp, fold_rh),
+                    );
+                    *entry = None;
                 }
             }
         }
@@ -543,7 +536,7 @@ impl AppState {
                     .enumerate()
                     .skip(1)
                     .for_each(|(i, cached)| {
-                        let Some((old, new, diff, _is_binary)) = cached else {
+                        let Some(cached) = cached else {
                             return; // skipped (binary/too large, already has placeholder)
                         };
                         let filename = pairs[i].relative_path.to_string_lossy();
@@ -552,9 +545,9 @@ impl AppState {
                             .as_ref()
                             .map_or_else(|| filename.clone(), |p| p.to_string_lossy());
                         let data = compute_diff_from_contents_with_diff(
-                            old,
-                            new,
-                            Some(diff),
+                            cached.old_content,
+                            cached.new_content,
+                            Some(cached.diff),
                             &filename,
                             &old_filename,
                             &hl,
@@ -604,8 +597,8 @@ impl AppState {
         let ctx = self.ctx.clone();
 
         rayon::spawn(move || {
-            let (_, old, new, diff, is_binary) = read_and_diff(&pair);
-            let data = if is_binary {
+            let read = read_and_diff(&pair);
+            let data = if read.binary {
                 FileDiffData::binary_placeholder(
                     settings.behavior.fold_context,
                     settings.behavior.fold_expand_step,
@@ -618,9 +611,9 @@ impl AppState {
                     .as_ref()
                     .map_or_else(|| filename.clone(), |p| p.to_string_lossy());
                 compute_diff_from_contents_with_diff(
-                    old,
-                    new,
-                    Some(diff),
+                    read.old_content,
+                    read.new_content,
+                    Some(read.diff),
                     &filename,
                     &old_filename,
                     &hl,
@@ -741,12 +734,11 @@ impl AppState {
     pub fn new_for_test(file_pairs: Vec<FilePair>, review_state: ReviewState) -> Self {
         let highlighter = Arc::new(Highlighter::new(None));
         let defaults = crate::domain::settings::Settings::default();
-        let phase1: Vec<(DiffStat, String, String, LineDiff, bool)> =
-            file_pairs.iter().map(read_and_diff).collect();
-        let diff_stats: Vec<DiffStat> = phase1.iter().map(|(s, _, _, _, _)| *s).collect();
+        let phase1: Vec<PairDiff> = file_pairs.iter().map(read_and_diff).collect();
+        let diff_stats: Vec<DiffStat> = phase1.iter().map(|p| p.stat).collect();
         let mut diff_cache = HashMap::new();
-        for (i, (_, old, new, diff, is_binary)) in phase1.into_iter().enumerate() {
-            let data = if is_binary {
+        for (i, read) in phase1.into_iter().enumerate() {
+            let data = if read.binary {
                 FileDiffData::binary_placeholder(
                     defaults.behavior.fold_context,
                     defaults.behavior.fold_expand_step,
@@ -759,9 +751,9 @@ impl AppState {
                     .as_ref()
                     .map_or_else(|| filename.clone(), |p| p.to_string_lossy());
                 compute_diff_from_contents_with_diff(
-                    old,
-                    new,
-                    Some(diff),
+                    read.old_content,
+                    read.new_content,
+                    Some(read.diff),
                     &filename,
                     &old_filename,
                     &highlighter,
@@ -1107,21 +1099,48 @@ fn read_text_file(path: &Path) -> Option<String> {
     }
 }
 
-/// Read file contents and compute diff + stats in one pass.
-/// Returns (stat, old_content, new_content, diff, is_binary) so callers can reuse the data.
-pub fn read_and_diff(pair: &FilePair) -> (DiffStat, String, String, LineDiff, bool) {
+/// Both sides of a file pair, read and line-diffed. The raw input to
+/// [`compute_diff_from_contents_with_diff`], which turns it into the rendered
+/// [`FileDiffData`].
+pub struct PairDiff {
+    pub stat: DiffStat,
+    pub old_content: String,
+    pub new_content: String,
+    pub diff: LineDiff,
+    /// Either side was non-UTF-8 or contained null bytes.
+    pub binary: bool,
+    /// Line counts for the `max_diff_lines` guard. Counted here, on the worker
+    /// that already holds the content, so the guard doesn't rescan every file
+    /// serially on the UI thread.
+    pub old_line_count: usize,
+    pub new_line_count: usize,
+}
+
+/// Read both sides of a pair and compute their line diff and stats.
+pub fn read_and_diff(pair: &FilePair) -> PairDiff {
     let old_result = pair.left_path.as_ref().map(|p| read_text_file(p));
     let new_result = pair.right_path.as_ref().map(|p| read_text_file(p));
 
     // If either side is binary, flag the whole pair as binary.
-    let is_binary = matches!(old_result, Some(None)) || matches!(new_result, Some(None));
+    let binary = matches!(old_result, Some(None)) || matches!(new_result, Some(None));
 
     let old_content = old_result.flatten().unwrap_or_default();
     let new_content = new_result.flatten().unwrap_or_default();
 
+    let old_line_count = old_content.lines().count();
+    let new_line_count = new_content.lines().count();
+
     let diff = diff_lines(&old_content, &new_content);
     let stat = diff_stat(&diff.ops);
-    (stat, old_content, new_content, diff, is_binary)
+    PairDiff {
+        stat,
+        old_content,
+        new_content,
+        diff,
+        binary,
+        old_line_count,
+        new_line_count,
+    }
 }
 
 /// Core diff computation. If `pre_diff` is `Some`, reuses the pre-computed diff ops
@@ -1894,5 +1913,98 @@ mod tests {
             assert_eq!(idx.line(i), *exp, "mismatch at line {i}");
         }
         assert_eq!(idx.len(), expected.len());
+    }
+
+    /// The `AppState::new` pre-filter, which substitutes placeholders for
+    /// oversized and binary files so the background pass skips them. It runs
+    /// only for indices >= 1 (file 0 is computed eagerly), and it reads the
+    /// line counts carried on `PairDiff` rather than rescanning the content.
+    #[test]
+    fn prefilter_substitutes_placeholders_past_file_zero() {
+        use crate::domain::file_pair::walk_and_pair;
+        use crate::domain::review_state::ReviewState;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (left, right) = (dir.path().join("left"), dir.path().join("right"));
+        std::fs::create_dir_all(&left).expect("create left");
+        std::fs::create_dir_all(&right).expect("create right");
+        let write = |root: &Path, name: &str, bytes: &[u8]| {
+            std::fs::write(root.join(name), bytes).expect("write fixture");
+        };
+
+        // Names chosen so the small file sorts first: the other two then land
+        // past index 0, which is the only place the pre-filter looks.
+        write(&left, "a_small.txt", b"one\ntwo\nthree\n");
+        write(&right, "a_small.txt", b"one\nTWO\nthree\n");
+        let big_old = "old line\n".repeat(20);
+        let big_new = "new line\n".repeat(20);
+        write(&left, "b_large.txt", big_old.as_bytes());
+        write(&right, "b_large.txt", big_new.as_bytes());
+        write(&left, "c_binary.bin", b"\x00\x01\x02payload\x00");
+        write(&right, "c_binary.bin", b"\x00\x01\x03payload\x00");
+
+        // Rename detection is irrelevant here (every file exists on both
+        // sides), so pin the limit rather than shelling out to git config.
+        let pairs = walk_and_pair(
+            &left,
+            &right,
+            false,
+            crate::domain::settings::RenameLimit::Fixed(0),
+        )
+        .expect("walk");
+        let index_of = |name: &str| {
+            pairs
+                .iter()
+                .position(|p| p.relative_path == Path::new(name))
+                .unwrap_or_else(|| panic!("{name} missing from pairs"))
+        };
+        let (small, large, binary) = (
+            index_of("a_small.txt"),
+            index_of("b_large.txt"),
+            index_of("c_binary.bin"),
+        );
+        assert_eq!(small, 0, "small file must sort first for this test to bite");
+
+        let defaults = crate::domain::settings::Settings::default();
+        let settings = crate::domain::settings::Settings {
+            behavior: crate::domain::settings::BehaviorSettings {
+                max_diff_lines: 10,
+                ..defaults.behavior
+            },
+            ..defaults
+        };
+        let review = ReviewState::new(pairs.iter().map(|p| p.relative_path.clone()).collect());
+        let state = AppState::new(
+            pairs,
+            review,
+            None,
+            eframe::egui::Context::default(),
+            settings,
+            FontVariants {
+                has_bold: false,
+                has_italic: false,
+                has_bold_italic: false,
+            },
+        );
+
+        // Under the limit and computed eagerly — a real diff, not a placeholder.
+        let small_data = &state.diff_cache[&small];
+        assert!(small_data.too_large_message.is_none());
+        assert!(!small_data.binary);
+        assert!(!small_data.aligned_rows.is_empty());
+
+        // 20 lines a side against a limit of 10. The counts in the message come
+        // from `PairDiff`, so a wrong count here means the wrong field was read.
+        let msg = state.diff_cache[&large]
+            .too_large_message
+            .as_deref()
+            .expect("oversized file should get a too-large placeholder");
+        assert!(msg.contains("20 / 20"), "unexpected message: {msg}");
+        assert!(msg.contains("limit 10"), "unexpected message: {msg}");
+        assert!(state.diff_cache[&large].aligned_rows.is_empty());
+
+        // Binary is checked before size, and yields a different placeholder.
+        assert!(state.diff_cache[&binary].binary);
+        assert!(state.diff_cache[&binary].too_large_message.is_none());
     }
 }

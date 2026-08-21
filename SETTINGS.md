@@ -52,6 +52,7 @@ All colors are hex strings in `"#RRGGBB"` or `"#RRGGBBAA"` format. The alpha cha
 | `editor`               | string | `""`    | Editor command for "open in editor" (Ctrl+O). When empty, falls back to `$VISUAL` then `$EDITOR`. May include arguments and `{file}` / `{line}` placeholders. |
 | `default_diff_mode`    | string | `"side-by-side"` | Default diff view mode. Accepts `"side-by-side"`, `"unified"` or `"auto"`. With `"auto"` the mode is picked once at startup based on window width: side-by-side when two 80-column panels fit, unified otherwise. |
 | `max_diff_lines`       | int    | `4000`  | Maximum lines per file before showing a "too large" placeholder. Files above this limit can still be computed on demand via the "Calculate anyway" button. Set to `0` to disable the limit (all files computed regardless of size). |
+| `rename_limit`         | int or `"git"` | `"git"` | Maximum deleted/added candidate files per side for inexact rename detection. `"git"` resolves `git config diff.renameLimit` from the working directory, falling back to `1000` when unset or git is unavailable. Set to `0` to disable the limit. |
 
 ### Open in editor
 

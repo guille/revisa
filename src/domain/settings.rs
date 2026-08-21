@@ -107,6 +107,18 @@ pub enum DiffModePreference {
     Auto,
 }
 
+/// Cap on inexact rename detection, mirroring git's `diff.renameLimit`:
+/// when a diff has more deleted or added candidate files than the limit,
+/// only exact (identical-content) renames are detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameLimit {
+    /// Resolve from `git config diff.renameLimit`, falling back to a built-in
+    /// default when unset or git is unavailable.
+    Git,
+    /// Fixed limit. 0 disables the limit.
+    Fixed(usize),
+}
+
 #[derive(Debug, Clone)]
 pub struct BehaviorSettings {
     pub use_nerdfont_icons: bool,
@@ -122,6 +134,8 @@ pub struct BehaviorSettings {
     pub default_diff_mode: DiffModePreference,
     /// Maximum lines per file before showing "too large" placeholder. 0 = no limit.
     pub max_diff_lines: usize,
+    /// Candidate-file cap for inexact rename detection.
+    pub rename_limit: RenameLimit,
 }
 
 /// A keybind: an egui key plus modifier flags.
@@ -420,6 +434,7 @@ impl Default for BehaviorSettings {
             editor: None,
             default_diff_mode: DiffModePreference::Auto,
             max_diff_lines: 4_000,
+            rename_limit: RenameLimit::Git,
         }
     }
 }
@@ -575,6 +590,15 @@ struct RawBehavior {
     editor: Option<String>,
     default_diff_mode: Option<String>,
     max_diff_lines: Option<u64>,
+    rename_limit: Option<RawRenameLimit>,
+}
+
+/// `behavior.rename_limit` accepts either an integer or the string `"git"`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawRenameLimit {
+    Number(i64),
+    Text(String),
 }
 
 #[derive(Deserialize, Default)]
@@ -939,6 +963,18 @@ impl Settings {
             .filter(|s| !s.is_empty())
             .map(|s| expand_tilde(&s));
 
+        let rename_limit = match raw.behavior.rename_limit {
+            None => defaults.behavior.rename_limit,
+            Some(RawRenameLimit::Text(ref s)) if s == "git" => RenameLimit::Git,
+            Some(RawRenameLimit::Number(n)) if n >= 0 => RenameLimit::Fixed(n as usize),
+            Some(_) => {
+                errors.push(
+                    "behavior.rename_limit: expected \"git\" or a non-negative integer".into(),
+                );
+                defaults.behavior.rename_limit
+            }
+        };
+
         let behavior = BehaviorSettings {
             use_nerdfont_icons: raw
                 .behavior
@@ -964,6 +1000,7 @@ impl Settings {
                 }
             },
             max_diff_lines,
+            rename_limit,
         };
 
         // --- Keybinds ---
@@ -1184,6 +1221,44 @@ default_diff_mode = "vertical"
         let err = Settings::parse(toml).unwrap_err();
         assert!(err.contains("behavior.default_diff_mode"));
         assert!(err.contains("'auto'"));
+    }
+
+    #[test]
+    fn test_rename_limit_parsing() {
+        let s = Settings::parse("").unwrap();
+        assert_eq!(s.behavior.rename_limit, RenameLimit::Git);
+
+        let toml = r#"
+[behavior]
+rename_limit = "git"
+"#;
+        let s = Settings::parse(toml).unwrap();
+        assert_eq!(s.behavior.rename_limit, RenameLimit::Git);
+
+        let toml = r"
+[behavior]
+rename_limit = 500
+";
+        let s = Settings::parse(toml).unwrap();
+        assert_eq!(s.behavior.rename_limit, RenameLimit::Fixed(500));
+
+        let toml = r"
+[behavior]
+rename_limit = 0
+";
+        let s = Settings::parse(toml).unwrap();
+        assert_eq!(s.behavior.rename_limit, RenameLimit::Fixed(0));
+    }
+
+    #[test]
+    fn test_rename_limit_invalid() {
+        for toml in [
+            "[behavior]\nrename_limit = \"banana\"",
+            "[behavior]\nrename_limit = -1",
+        ] {
+            let err = Settings::parse(toml).unwrap_err();
+            assert!(err.contains("behavior.rename_limit"), "{err}");
+        }
     }
 
     #[test]

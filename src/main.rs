@@ -187,7 +187,12 @@ fn run_diff(left: PathBuf, right: PathBuf, config: Option<PathBuf>, filter_uncha
 
     let theme_path: Option<PathBuf> = settings.behavior.theme.clone();
 
-    let file_pairs = match domain::file_pair::walk_and_pair(&left, &right, filter_unchanged) {
+    let file_pairs = match domain::file_pair::walk_and_pair(
+        &left,
+        &right,
+        filter_unchanged,
+        settings.behavior.rename_limit,
+    ) {
         Ok(pairs) => pairs,
         Err(e) => {
             eprintln!("Error scanning directories: {e}");

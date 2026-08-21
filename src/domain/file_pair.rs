@@ -1,3 +1,4 @@
+use crate::domain::settings::RenameLimit;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
@@ -86,6 +87,7 @@ pub fn walk_and_pair(
     left_dir: &Path,
     right_dir: &Path,
     filter_unchanged: bool,
+    rename_limit: RenameLimit,
 ) -> io::Result<Vec<FilePair>> {
     let left_files = collect_relative_paths(left_dir)?;
     let right_files = collect_relative_paths(right_dir)?;
@@ -138,7 +140,7 @@ pub fn walk_and_pair(
         });
     }
 
-    detect_renames(&mut pairs, 50);
+    detect_renames(&mut pairs, 50, rename_limit);
 
     Ok(pairs)
 }
@@ -146,6 +148,25 @@ pub fn walk_and_pair(
 /// Maximum number of lines to consider for rename similarity computation.
 /// Files larger than this are skipped to avoid expensive diff operations.
 const RENAME_MAX_LINES: usize = 10_000;
+
+/// Fallback for `RenameLimit::Git` when `diff.renameLimit` is unset or git is
+/// unavailable. Matches git's own default.
+const DEFAULT_RENAME_LIMIT: usize = 1000;
+
+/// `diff.renameLimit` from git config, resolved from the current directory
+/// (which is the repo worktree when running as a difftool). `None` when git
+/// is unavailable or the key is unset; values <= 0 mean unlimited (0).
+fn git_rename_limit() -> Option<usize> {
+    let out = std::process::Command::new("git")
+        .args(["config", "--get", "--type=int", "diff.renameLimit"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let val: i64 = std::str::from_utf8(&out.stdout).ok()?.trim().parse().ok()?;
+    Some(if val <= 0 { 0 } else { val as usize })
+}
 
 /// Number of full line diffs run by rename detection (bench instrumentation).
 #[cfg(feature = "dev-tools")]
@@ -158,7 +179,11 @@ pub static RENAME_DIFFS: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 /// from line counts alone), scored with a full line diff in parallel, then
 /// greedily assigned from highest similarity downward. Binary files (non-UTF-8)
 /// and files exceeding `RENAME_MAX_LINES` are skipped.
-fn detect_renames(pairs: &mut Vec<FilePair>, threshold: u8) {
+///
+/// The inexact phase is gated by `rename_limit` like git's `diff.renameLimit`:
+/// when either side has more unmatched candidates than the limit, it is skipped
+/// (with a warning on stderr) and only exact matches are reported.
+fn detect_renames(pairs: &mut Vec<FilePair>, threshold: u8, rename_limit: RenameLimit) {
     use rayon::prelude::*;
 
     // Collect indices of deleted and added files.
@@ -227,64 +252,103 @@ fn detect_renames(pairs: &mut Vec<FilePair>, threshold: u8) {
         }
     }
 
-    // Pairwise scoring for the rest, skipping pairs whose similarity is
-    // provably below the threshold: first by line counts alone (O(1)), then
-    // by line-hash multiset intersection (O(a + b), vs a full diff).
-    let hashes_for = |contents: &[Option<(String, usize)>], matched: &[bool]| {
+    // Inexact detection cost grows with unmatched_del × unmatched_add, so it
+    // is gated like git's diff.renameLimit. The limit is only resolved (which
+    // may shell out to git) when there is inexact work to do.
+    let unmatched = |contents: &[Option<(String, usize)>], matched: &[bool]| {
         contents
+            .iter()
+            .zip(matched)
+            .filter(|(c, m)| c.is_some() && !**m)
+            .count()
+    };
+    let unmatched_del = unmatched(&deleted_contents, &matched_del);
+    let unmatched_add = unmatched(&added_contents, &matched_add);
+    let limit = if unmatched_del == 0 || unmatched_add == 0 {
+        0 // no inexact work; don't resolve the limit
+    } else {
+        match rename_limit {
+            RenameLimit::Fixed(n) => n,
+            RenameLimit::Git => git_rename_limit().unwrap_or(DEFAULT_RENAME_LIMIT),
+        }
+    };
+
+    if limit != 0 && unmatched_del.max(unmatched_add) > limit {
+        eprintln!(
+            "warning: inexact rename detection skipped: {unmatched_del} deleted × \
+             {unmatched_add} added files exceeds the rename limit ({limit}); \
+             moved-and-edited files will show as delete + add. Set \
+             behavior.rename_limit (or git's diff.renameLimit) to at least {} \
+             to re-enable.",
+            unmatched_del.max(unmatched_add)
+        );
+    } else if unmatched_del > 0 && unmatched_add > 0 {
+        // Pairwise scoring, skipping pairs whose similarity is provably below
+        // the threshold: first by line counts alone (O(1)), then by line-hash
+        // multiset intersection (O(a + b), vs a full diff).
+        let hashes_for = |contents: &[Option<(String, usize)>], matched: &[bool]| {
+            contents
+                .par_iter()
+                .enumerate()
+                .map(|(i, c)| match c {
+                    Some((text, _)) if !matched[i] => Some(line_hashes(text)),
+                    _ => None,
+                })
+                .collect::<Vec<Option<Vec<u64>>>>()
+        };
+        let deleted_hashes = hashes_for(&deleted_contents, &matched_del);
+        let added_hashes = hashes_for(&added_contents, &matched_add);
+
+        let candidate_pairs: Vec<(usize, usize)> = deleted_hashes
             .par_iter()
             .enumerate()
-            .map(|(i, c)| match c {
-                Some((text, _)) if !matched[i] => Some(line_hashes(text)),
-                _ => None,
+            .flat_map_iter(|(di, del)| {
+                let del_hashes = del.as_deref();
+                added_hashes
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(ai, add)| {
+                        let del_hashes = del_hashes?;
+                        let add_hashes = add.as_ref()?;
+                        if similarity_upper_bound(del_hashes.len(), add_hashes.len()) < threshold {
+                            return None;
+                        }
+                        let common = sorted_intersection_count(del_hashes, add_hashes);
+                        (similarity_from_matches(common, del_hashes.len() + add_hashes.len())
+                            >= threshold)
+                            .then_some((di, ai))
+                    })
             })
-            .collect::<Vec<Option<Vec<u64>>>>()
-    };
-    let deleted_hashes = hashes_for(&deleted_contents, &matched_del);
-    let added_hashes = hashes_for(&added_contents, &matched_add);
+            .collect();
 
-    let mut candidate_pairs: Vec<(usize, usize)> = Vec::new();
-    for (di, del) in deleted_hashes.iter().enumerate() {
-        let Some(del_hashes) = del else { continue };
-        for (ai, add) in added_hashes.iter().enumerate() {
-            let Some(add_hashes) = add else { continue };
-            if similarity_upper_bound(del_hashes.len(), add_hashes.len()) < threshold {
+        let mut candidates: Vec<(usize, usize, u8)> = candidate_pairs
+            .par_iter()
+            .filter_map(|&(di, ai)| {
+                let (del_text, _) = deleted_contents[di].as_ref()?;
+                let (add_text, _) = added_contents[ai].as_ref()?;
+                #[cfg(feature = "dev-tools")]
+                RENAME_DIFFS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let sim = line_similarity(del_text, add_text);
+                if sim >= threshold {
+                    Some((di, ai, sim))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by similarity descending for globally optimal greedy matching.
+        candidates.sort_unstable_by_key(|b| std::cmp::Reverse(b.2));
+
+        // Greedily assign matches: highest similarity wins.
+        for (di, ai, sim) in candidates {
+            if matched_del[di] || matched_add[ai] {
                 continue;
             }
-            let common = sorted_intersection_count(del_hashes, add_hashes);
-            if similarity_from_matches(common, del_hashes.len() + add_hashes.len()) >= threshold {
-                candidate_pairs.push((di, ai));
-            }
+            matched_del[di] = true;
+            matched_add[ai] = true;
+            renames.push((deleted_indices[di], added_indices[ai], sim));
         }
-    }
-
-    let mut candidates: Vec<(usize, usize, u8)> = candidate_pairs
-        .par_iter()
-        .filter_map(|&(di, ai)| {
-            let (del_text, _) = deleted_contents[di].as_ref()?;
-            let (add_text, _) = added_contents[ai].as_ref()?;
-            #[cfg(feature = "dev-tools")]
-            RENAME_DIFFS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let sim = line_similarity(del_text, add_text);
-            if sim >= threshold {
-                Some((di, ai, sim))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // Sort by similarity descending for globally optimal greedy matching.
-    candidates.sort_unstable_by_key(|b| std::cmp::Reverse(b.2));
-
-    // Greedily assign matches: highest similarity wins.
-    for (di, ai, sim) in candidates {
-        if matched_del[di] || matched_add[ai] {
-            continue;
-        }
-        matched_del[di] = true;
-        matched_add[ai] = true;
-        renames.push((deleted_indices[di], added_indices[ai], sim));
     }
 
     // Apply renames: merge deleted+added into renamed pairs.
@@ -521,7 +585,7 @@ mod tests {
     fn test_identical_files_are_skipped() {
         let (left, right) =
             setup_dirs(&[("foo.rs", "fn main() {}")], &[("foo.rs", "fn main() {}")]);
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert!(pairs.is_empty());
     }
 
@@ -529,7 +593,7 @@ mod tests {
     fn test_identical_files_included_without_filter() {
         let (left, right) =
             setup_dirs(&[("foo.rs", "fn main() {}")], &[("foo.rs", "fn main() {}")]);
-        let pairs = walk_and_pair(left.path(), right.path(), false).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), false, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].kind, FileChangeKind::Modified);
         assert_eq!(pairs[0].relative_path, PathBuf::from("foo.rs"));
@@ -541,7 +605,7 @@ mod tests {
             &[("foo.rs", "fn main() { old() }")],
             &[("foo.rs", "fn main() { new() }")],
         );
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].kind, FileChangeKind::Modified);
         assert_eq!(pairs[0].relative_path, PathBuf::from("foo.rs"));
@@ -552,7 +616,7 @@ mod tests {
     #[test]
     fn test_deleted_file() {
         let (left, right) = setup_dirs(&[("gone.rs", "content")], &[]);
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].kind, FileChangeKind::Deleted);
         assert!(pairs[0].left_path.is_some());
@@ -562,7 +626,7 @@ mod tests {
     #[test]
     fn test_added_file() {
         let (left, right) = setup_dirs(&[], &[("new.rs", "content")]);
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].kind, FileChangeKind::Added);
         assert!(pairs[0].left_path.is_none());
@@ -575,7 +639,7 @@ mod tests {
             &[("src/lib.rs", "old"), ("src/util/helper.rs", "old")],
             &[("src/lib.rs", "new"), ("src/util/helper.rs", "new")],
         );
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 2);
         let paths: Vec<_> = pairs.iter().map(|p| p.relative_path.clone()).collect();
         assert!(paths.contains(&PathBuf::from("src/lib.rs")));
@@ -596,7 +660,7 @@ mod tests {
                 ("added.rs", "hello"),
             ],
         );
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 3); // modified, deleted, added — "kept" is skipped
         let kinds: Vec<_> = pairs.iter().map(|p| &p.kind).collect();
         assert!(kinds.contains(&&FileChangeKind::Modified));
@@ -608,7 +672,7 @@ mod tests {
     fn test_empty_directories() {
         let left = tempfile::tempdir().unwrap();
         let right = tempfile::tempdir().unwrap();
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert!(pairs.is_empty());
     }
 
@@ -620,7 +684,7 @@ mod tests {
         let link = right.path().join("foo.rs");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         // Both sides have identical content (symlink resolved), so should be empty
         assert!(pairs.is_empty());
     }
@@ -636,7 +700,7 @@ mod tests {
 
         let other = tempfile::tempdir().unwrap();
         // Should complete without infinite recursion
-        let pairs = walk_and_pair(dir.path(), other.path(), true).unwrap();
+        let pairs = walk_and_pair(dir.path(), other.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].relative_path, PathBuf::from("sub/file.rs"));
     }
@@ -648,7 +712,7 @@ mod tests {
             &[("old.rs", "fn main() {}\nfn foo() {}\nfn bar() {}\n")],
             &[("new.rs", "fn main() {}\nfn foo() {}\nfn bar() {}\n")],
         );
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 1);
         assert!(matches!(
             pairs[0].kind,
@@ -670,7 +734,7 @@ mod tests {
             &[("src/old_name.rs", old_content)],
             &[("src/new_name.rs", new_content)],
         );
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 1);
         assert!(matches!(pairs[0].kind, FileChangeKind::Renamed { .. }));
         assert_eq!(pairs[0].relative_path, PathBuf::from("src/new_name.rs"));
@@ -690,11 +754,62 @@ mod tests {
             )],
             &[("new.rs", "brand new file\nwith unrelated stuff\n")],
         );
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 2);
         let kinds: Vec<_> = pairs.iter().map(|p| &p.kind).collect();
         assert!(kinds.contains(&&FileChangeKind::Deleted));
         assert!(kinds.contains(&&FileChangeKind::Added));
+    }
+
+    #[test]
+    fn test_rename_limit_gates_inexact_but_keeps_exact() {
+        // Two moved-and-edited files plus one exact move. Above the limit the
+        // exact rename must survive while the inexact ones fall back to
+        // delete + add.
+        let a_old = "a1\na2\na3\na4\na5\na6\na7\na8\n";
+        let a_new = "a1\na2\nchanged\na4\na5\na6\na7\na8\n";
+        let b_old = "b1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\n";
+        let b_new = "b1\nb2\nchanged\nb4\nb5\nb6\nb7\nb8\n";
+        let moved = "identical content\nmoved without edits\n";
+        let (left, right) = setup_dirs(
+            &[
+                ("a_old.rs", a_old),
+                ("b_old.rs", b_old),
+                ("m_old.rs", moved),
+            ],
+            &[
+                ("a_new.rs", a_new),
+                ("b_new.rs", b_new),
+                ("m_new.rs", moved),
+            ],
+        );
+
+        // 2 unmatched per side after the exact pass; limit 1 skips inexact.
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(1)).unwrap();
+        assert_eq!(pairs.len(), 5);
+        let renames: Vec<_> = pairs
+            .iter()
+            .filter(|p| matches!(p.kind, FileChangeKind::Renamed { .. }))
+            .collect();
+        assert_eq!(renames.len(), 1);
+        assert!(matches!(
+            renames[0].kind,
+            FileChangeKind::Renamed { similarity: 100 }
+        ));
+        assert_eq!(renames[0].relative_path, PathBuf::from("m_new.rs"));
+
+        // At the limit (2 per side), inexact detection runs.
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(2)).unwrap();
+        assert_eq!(pairs.len(), 3);
+        assert!(
+            pairs
+                .iter()
+                .all(|p| matches!(p.kind, FileChangeKind::Renamed { .. }))
+        );
+
+        // 0 = unlimited.
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
+        assert_eq!(pairs.len(), 3);
     }
 
     #[test]
@@ -707,7 +822,7 @@ mod tests {
             &[("original.rs", original)],
             &[("close.rs", close_match), ("far.rs", far_match)],
         );
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         // Should have 2 entries: renamed (original→close) + added (far).
         assert_eq!(pairs.len(), 2);
         let renamed = pairs
@@ -735,7 +850,7 @@ mod tests {
                 ("renamed.rs", "fn x() {}\nfn y() {}\n"),
             ],
         );
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 2);
         let modified = pairs.iter().find(|p| p.kind == FileChangeKind::Modified);
         assert!(modified.is_some());
@@ -814,7 +929,7 @@ mod tests {
             &[("dup_a.txt", content), ("dup_b.txt", content)],
             &[("moved.txt", content)],
         );
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 2);
         let renamed: Vec<_> = pairs
             .iter()
@@ -843,7 +958,7 @@ mod tests {
             let _ = writeln!(large, "l{i}");
         }
         let (left, right) = setup_dirs(&[("small.txt", small)], &[("large.txt", &large)]);
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 2);
         assert!(
             pairs
@@ -867,7 +982,7 @@ mod tests {
             &[("d1.rs", d1), ("d2.rs", d2)],
             &[("a1.rs", a1), ("a2.rs", a2)],
         );
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 2);
         // Both should be renames.
         assert!(
@@ -890,7 +1005,7 @@ mod tests {
         // Write binary content to left.
         let bin_path = left.path().join("old.bin");
         fs::write(&bin_path, [0x00, 0x01, 0xFF, 0xFE, 0x89, 0x50]).unwrap();
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 2);
         assert!(pairs.iter().any(|p| p.kind == FileChangeKind::Deleted));
         assert!(pairs.iter().any(|p| p.kind == FileChangeKind::Added));
@@ -900,7 +1015,7 @@ mod tests {
     fn test_rename_empty_files_match() {
         // Two empty files: deleted empty + added empty → rename at 100%.
         let (left, right) = setup_dirs(&[("old_empty.rs", "")], &[("new_empty.rs", "")]);
-        let pairs = walk_and_pair(left.path(), right.path(), true).unwrap();
+        let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         assert_eq!(pairs.len(), 1);
         assert!(matches!(
             pairs[0].kind,
