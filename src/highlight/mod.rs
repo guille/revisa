@@ -148,7 +148,7 @@ pub struct HighlightedFile {
 }
 
 /// A single syntax-highlighted span within a line.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SyntaxSpan {
     pub range: Range<usize>,
     pub style: SyntectStyle,
@@ -198,11 +198,6 @@ impl Highlighter {
             .expect("bundled default.tmTheme should be valid")
     }
 
-    /// Return an empty highlighted file (no lines, no syntax work).
-    pub fn empty_file() -> HighlightedFile {
-        HighlightedFile { lines: Vec::new() }
-    }
-
     /// Get the default foreground color from the theme.
     pub fn default_fg(&self) -> [u8; 4] {
         let fg = self.theme.settings.foreground.unwrap_or(SyntectColor {
@@ -216,18 +211,96 @@ impl Highlighter {
 
     /// Highlight an entire file, returning per-line syntax spans.
     pub fn highlight_file(&self, content: &str, filename: &str) -> HighlightedFile {
-        let syntax = self.detect_syntax(filename, content);
-        let mut highlighter = HighlightLines::new(syntax, &self.theme);
+        self.highlight_with(self.detect_syntax(filename, content), content)
+    }
+
+    /// Highlight both sides of a diff, parsing their common leading lines once.
+    ///
+    /// A line's spans depend on the parse state the previous line left behind,
+    /// so only a run starting at line 0 can be shared: after `shared_prefix`
+    /// the state is cloned and each side continues independently. Reuse also
+    /// needs both names to resolve to the same syntax, which a rename can
+    /// break. `shared_prefix` must not exceed either side's line count.
+    pub fn highlight_pair(
+        &self,
+        old_content: &str,
+        new_content: &str,
+        old_filename: &str,
+        new_filename: &str,
+        shared_prefix: usize,
+    ) -> (HighlightedFile, HighlightedFile) {
+        let old_syntax = self.detect_syntax(old_filename, old_content);
+        let new_syntax = self.detect_syntax(new_filename, new_content);
+
+        if shared_prefix == 0 || !std::ptr::eq(old_syntax, new_syntax) {
+            return (
+                self.highlight_with(old_syntax, old_content),
+                self.highlight_with(new_syntax, new_content),
+            );
+        }
+
+        let mut buf = String::with_capacity(256);
+        let mut prefix = Vec::with_capacity(shared_prefix);
+        let mut shared = HighlightLines::new(old_syntax, &self.theme);
+        self.highlight_into(
+            &mut shared,
+            old_content.lines().take(shared_prefix),
+            &mut buf,
+            &mut prefix,
+        );
+
+        let (highlight_state, parse_state) = shared.state();
+        let mut old_hl = HighlightLines::from_state(
+            &self.theme,
+            highlight_state.clone(),
+            parse_state.clone(),
+        );
+        let mut new_hl = HighlightLines::from_state(&self.theme, highlight_state, parse_state);
+
+        let mut old_lines = prefix.clone();
+        let mut new_lines = prefix;
+        self.highlight_into(
+            &mut old_hl,
+            old_content.lines().skip(shared_prefix),
+            &mut buf,
+            &mut old_lines,
+        );
+        self.highlight_into(
+            &mut new_hl,
+            new_content.lines().skip(shared_prefix),
+            &mut buf,
+            &mut new_lines,
+        );
+
+        (
+            HighlightedFile { lines: old_lines },
+            HighlightedFile { lines: new_lines },
+        )
+    }
+
+    fn highlight_with(&self, syntax: &SyntaxReference, content: &str) -> HighlightedFile {
+        let mut hl = HighlightLines::new(syntax, &self.theme);
         let mut buf = String::with_capacity(256);
         let mut lines = Vec::new();
+        self.highlight_into(&mut hl, content.lines(), &mut buf, &mut lines);
+        HighlightedFile { lines }
+    }
 
-        for line in content.lines() {
+    /// Append per-line spans for `lines` to `out`, advancing `hl`'s state.
+    fn highlight_into<'a>(
+        &self,
+        hl: &mut HighlightLines<'_>,
+        lines: impl Iterator<Item = &'a str>,
+        buf: &mut String,
+        out: &mut Vec<Vec<SyntaxSpan>>,
+    ) {
+        for line in lines {
             // Very long lines (minified content) render with the default
             // style: regex cost grows with line length — pathologically so
             // under fancy-regex — and highlighting adds nothing there.
             // The parse state carries over the skipped line unchanged.
             if line.len() > MAX_HIGHLIGHT_LINE_BYTES {
-                lines.push(Vec::new());
+                out.push(Vec::new());
                 continue;
             }
             // syntect expects the line with its newline for state tracking.
@@ -235,9 +308,7 @@ impl Highlighter {
             buf.clear();
             buf.push_str(line);
             buf.push('\n');
-            let ranges = highlighter
-                .highlight_line(&buf, &self.syntax_set)
-                .unwrap_or_default();
+            let ranges = hl.highlight_line(buf, &self.syntax_set).unwrap_or_default();
 
             let mut offset = 0;
             let spans: Vec<SyntaxSpan> = ranges
@@ -262,10 +333,8 @@ impl Highlighter {
                     Some(span)
                 })
                 .collect();
-            lines.push(spans);
+            out.push(spans);
         }
-
-        HighlightedFile { lines }
     }
 
     /// Pick a syntax for `filename`, falling back to `content`'s first line
@@ -458,6 +527,71 @@ mod tests {
         let spans = vec![make_syntax_span(0..5, 100, 100, 100)];
         let result = compose_line(&spans, DiffBg::None, 5, [200, 200, 200, 255], test_colors());
         assert_eq!(result[0].bg, [0, 0, 0, 0]); // transparent
+    }
+
+    /// Sharing the parse of the common prefix must not change what either
+    /// side produces. The fork point comes from the line diff, so anything
+    /// that makes `str::lines` and the diff's line indexing disagree — CRLF,
+    /// a missing final newline, a bare trailing `\r` — lands the fork on the
+    /// wrong line and corrupts every line after it.
+    #[test]
+    fn test_highlight_pair_matches_independent_highlighting() {
+        use crate::domain::diff::{diff_lines, leading_equal_lines};
+
+        let long = "x".repeat(MAX_HIGHLIGHT_LINE_BYTES + 10);
+        let cases: &[(&str, &str, &str, &str)] = &[
+            // Shared prefix, then a divergence.
+            (
+                "fn a() {}\nfn b() {}\nfn c() {}\n",
+                "fn a() {}\nfn b() {}\nfn d() {}\n",
+                "x.rs",
+                "x.rs",
+            ),
+            // Pure append: the whole old side is prefix.
+            ("fn a() {}\n", "fn a() {}\nfn b() {}\n", "x.rs", "x.rs"),
+            // Edit on line 0: no prefix at all.
+            ("fn a() {}\nfn b() {}\n", "fn z() {}\nfn b() {}\n", "x.rs", "x.rs"),
+            // CRLF on both sides, and mixed with LF.
+            ("a\r\nb\r\nc\r\n", "a\r\nb\r\nd\r\n", "x.rs", "x.rs"),
+            ("let a = 1;\nlet b = 2;\r\n", "let a = 1;\nlet c = 2;\r\n", "x.rs", "x.rs"),
+            // Line endings differ across sides: the prefix must not be shared
+            // on lines that only look equal after `\r` stripping.
+            ("a\r\nb\r\n", "a\nb\n", "x.rs", "x.rs"),
+            // No trailing newline, and a bare `\r` ending the content.
+            ("a\nb\nc", "a\nb\nd", "x.rs", "x.rs"),
+            ("a\nb\r", "a\nc\r", "x.rs", "x.rs"),
+            // Empty sides (added / deleted files).
+            ("", "fn a() {}\n", "x.rs", "x.rs"),
+            ("fn a() {}\n", "", "x.rs", "x.rs"),
+            ("", "", "x.rs", "x.rs"),
+            // Blank lines inside the prefix.
+            ("a\n\n\nb\n", "a\n\n\nc\n", "x.rs", "x.rs"),
+            // A line too long to highlight, inside the shared prefix.
+            (
+                &format!("fn a() {{}}\n{long}\nfn b() {{}}\n"),
+                &format!("fn a() {{}}\n{long}\nfn c() {{}}\n"),
+                "x.rs",
+                "x.rs",
+            ),
+            // Rename across languages: same prefix text, different syntax.
+            ("a = 1\nb = 2\n", "a = 1\nb = 3\n", "x.rs", "x.py"),
+        ];
+
+        let h = Highlighter::new(None);
+        for (old, new, old_name, new_name) in cases {
+            let prefix = leading_equal_lines(&diff_lines(old, new).ops);
+            let (got_old, got_new) = h.highlight_pair(old, new, old_name, new_name, prefix);
+            let want_old = h.highlight_file(old, old_name);
+            let want_new = h.highlight_file(new, new_name);
+            assert_eq!(
+                got_old.lines, want_old.lines,
+                "old side differs for {old:?} -> {new:?} (prefix {prefix})"
+            );
+            assert_eq!(
+                got_new.lines, want_new.lines,
+                "new side differs for {old:?} -> {new:?} (prefix {prefix})"
+            );
+        }
     }
 
     /// Syntax detection reads only its two arguments — never the filesystem.

@@ -123,6 +123,7 @@ pub fn run(opts: &Options) {
             let mut lines = 0usize;
             let mut added = 0usize;
             let mut deleted = 0usize;
+            let mut prefix = 0usize;
             let data: Vec<(String, String, bool)> = pairs
                 .iter()
                 .map(|p| {
@@ -132,12 +133,13 @@ pub fn run(opts: &Options) {
                     lines += read.old_line_count + read.new_line_count;
                     added += read.stat.map_or(0, |s| s.added);
                     deleted += read.stat.map_or(0, |s| s.deleted);
+                    prefix += crate::domain::diff::leading_equal_lines(&read.diff.ops);
                     (read.old_content, read.new_content, read.binary)
                 })
                 .collect();
-            (data, lines, added, deleted)
+            (data, lines, added, deleted, prefix)
         });
-        let (data, lines, added, deleted) = data;
+        let (data, lines, added, deleted, prefix) = data;
         read_data = data;
         if want("read-diff") {
             results.push(StageResult {
@@ -149,6 +151,8 @@ pub fn run(opts: &Options) {
                     ("lines_per_s", rate(lines, wall)),
                     ("added", added as f64),
                     ("deleted", deleted as f64),
+                    ("prefix_lines", prefix as f64),
+                    ("prefix_pct", 100.0 * prefix as f64 / lines.max(1) as f64),
                 ],
             });
         }

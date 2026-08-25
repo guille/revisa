@@ -69,6 +69,21 @@ pub fn diff_lines(old: &str, new: &str) -> LineDiff {
     LineDiff { ops }
 }
 
+/// Lines both sides share before the first change.
+///
+/// Syntax highlighting is sequential — a line's spans depend on the parse
+/// state the previous line left behind — so this leading run is the only part
+/// of a pair that can be parsed once for both sides instead of once per side.
+pub fn leading_equal_lines(ops: &[DiffOp]) -> usize {
+    match ops.first() {
+        Some(DiffOp::Equal {
+            old_range,
+            new_range,
+        }) if old_range.start == 0 && new_range.start == 0 => old_range.len(),
+        _ => 0,
+    }
+}
+
 /// Summary statistics for a file diff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiffStat {

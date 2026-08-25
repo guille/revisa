@@ -1,4 +1,6 @@
-use crate::domain::diff::{DiffStat, InlineSpan, LineDiff, diff_inline, diff_lines, diff_stat};
+use crate::domain::diff::{
+    DiffStat, InlineSpan, LineDiff, diff_inline, diff_lines, diff_stat, leading_equal_lines,
+};
 use crate::domain::file_pair::FilePair;
 use crate::domain::file_tree::{FlatEntry, TreeNode, build_tree, flatten_tree};
 use crate::domain::fold::{DiffMode, FoldState};
@@ -1260,16 +1262,13 @@ pub fn compute_diff_from_contents_with_diff(
     let aligned_rows = build_aligned_rows(&diff.ops);
     let hunks = extract_hunks(&aligned_rows, &diff.ops, HUNK_CONTEXT);
 
-    let old_highlight = if old_content.is_empty() {
-        Highlighter::empty_file()
-    } else {
-        highlighter.highlight_file(old_content, old_filename)
-    };
-    let new_highlight = if new_content.is_empty() {
-        Highlighter::empty_file()
-    } else {
-        highlighter.highlight_file(new_content, filename)
-    };
+    let (old_highlight, new_highlight) = highlighter.highlight_pair(
+        old_content,
+        new_content,
+        old_filename,
+        filename,
+        leading_equal_lines(&diff.ops),
+    );
 
     let default_fg = highlighter.default_fg();
 

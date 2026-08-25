@@ -1,8 +1,8 @@
 //! Deterministic PR-shaped corpus generator for the bench suite.
 //!
-//! Produces a left/right directory pair mixing languages, file sizes, and
-//! change kinds, plus a ground-truth rename manifest so rename detection can
-//! be scored for precision/recall, not just speed.
+//! Produces a left/right directory pair mixing languages, file sizes, change
+//! kinds, and edit shapes, plus a ground-truth rename manifest so rename
+//! detection can be scored for precision/recall, not just speed.
 
 use std::fs;
 use std::io;
@@ -256,7 +256,59 @@ fn gen_file(lang: Lang, rng: &mut Rng, target_lines: usize) -> Vec<String> {
     out
 }
 
-/// Apply roughly `pct`% line edits in short runs of replace/insert/delete.
+/// Where a modified file's edits land.
+///
+/// Uniformly scattered edits are not what review diffs look like: ~50
+/// independent runs over a file put the first change ~2% in, so every pair
+/// has a negligible unchanged prefix. Real edits cluster into a few regions,
+/// leaving long untouched runs — which fold collapsing, hunk extraction and
+/// any per-pair work that reuses the common prefix all depend on. The cycle
+/// keeps the scattered and header shapes for pessimal coverage.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditShape {
+    /// Edits spread uniformly over the whole file.
+    Scattered,
+    /// One to three contiguous regions.
+    Clustered,
+    /// New blocks appended at the end (changelogs, lockfiles, fixtures).
+    Appended,
+    /// Edits confined to the top (imports, headers).
+    Header,
+}
+
+const SHAPE_CYCLE: &[EditShape] = &[
+    EditShape::Clustered,
+    EditShape::Clustered,
+    EditShape::Appended,
+    EditShape::Scattered,
+    EditShape::Clustered,
+    EditShape::Header,
+    EditShape::Clustered,
+    EditShape::Appended,
+];
+
+/// Apply one contiguous run of edits at `pos` as replace, delete, or insert.
+fn edit_run(lines: &mut Vec<String>, lang: Lang, rng: &mut Rng, pos: usize, run: usize) {
+    match rng.below(3) {
+        0 => {
+            for line in lines.iter_mut().skip(pos).take(run) {
+                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+                *line = statement(lang, rng, &indent);
+            }
+        }
+        1 => {
+            lines.drain(pos..(pos + run).min(lines.len()));
+        }
+        _ => {
+            for _ in 0..run {
+                lines.insert(pos, statement(lang, rng, "    "));
+            }
+        }
+    }
+}
+
+/// Apply roughly `pct`% line edits in short runs of replace/insert/delete,
+/// spread uniformly over the file.
 fn mutate(lines: &mut Vec<String>, lang: Lang, rng: &mut Rng, pct: usize) {
     let target = (lines.len() * pct / 100).max(1);
     let mut edited = 0;
@@ -265,23 +317,62 @@ fn mutate(lines: &mut Vec<String>, lang: Lang, rng: &mut Rng, pct: usize) {
         let run = (1 + rng.below(3))
             .min(lines.len() - pos)
             .min(target - edited + 1);
-        match rng.below(3) {
-            0 => {
-                for line in lines.iter_mut().skip(pos).take(run) {
-                    let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-                    *line = statement(lang, rng, &indent);
-                }
-            }
-            1 => {
-                lines.drain(pos..pos + run);
-            }
-            _ => {
-                for _ in 0..run {
-                    lines.insert(pos, statement(lang, rng, "    "));
-                }
+        edit_run(lines, lang, rng, pos, run);
+        edited += run;
+    }
+}
+
+/// Apply roughly `pct`% line edits distributed according to `shape`.
+fn mutate_shaped(lines: &mut Vec<String>, lang: Lang, rng: &mut Rng, pct: usize, shape: EditShape) {
+    if lines.is_empty() {
+        return;
+    }
+    let target = (lines.len() * pct / 100).max(1);
+    match shape {
+        EditShape::Scattered => mutate(lines, lang, rng, pct),
+        EditShape::Clustered => {
+            let hunks = 1 + rng.below(3);
+            let per = (target / hunks).max(1);
+            // One anchor per equal slice of the file, applied back to front so
+            // earlier anchors stay valid as later edits shift the line count.
+            let mut anchors: Vec<usize> = (0..hunks)
+                .map(|h| {
+                    let lo = lines.len() * h / hunks;
+                    let hi = (lines.len() * (h + 1) / hunks).max(lo + 1);
+                    lo + rng.below(hi - lo)
+                })
+                .collect();
+            anchors.sort_unstable();
+            for &pos in anchors.iter().rev() {
+                let run = per.min(lines.len().saturating_sub(pos)).max(1);
+                edit_run(lines, lang, rng, pos, run);
             }
         }
-        edited += run;
+        EditShape::Appended => {
+            let mut block = Vec::new();
+            while block.len() < target {
+                push_block(lang, rng, &mut block);
+            }
+            // JSON closes with a brace; append inside it to stay parseable.
+            let at = if lang == Lang::Json {
+                lines.len().saturating_sub(1)
+            } else {
+                lines.len()
+            };
+            lines.splice(at..at, block);
+        }
+        EditShape::Header => {
+            let head = (lines.len() / 10).max(1);
+            let mut edited = 0;
+            while edited < target.min(head) && !lines.is_empty() {
+                let pos = rng.below(head.min(lines.len()));
+                let run = (1 + rng.below(3))
+                    .min(lines.len().saturating_sub(pos))
+                    .max(1);
+                edit_run(lines, lang, rng, pos, run);
+                edited += run;
+            }
+        }
     }
 }
 
@@ -341,6 +432,7 @@ pub fn generate(scale: usize, seed: u64) -> io::Result<Corpus> {
 
     let lang_at = |i: usize| LANG_CYCLE[i % LANG_CYCLE.len()];
     let size_at = |i: usize| SIZES[i % SIZES.len()];
+    let shape_at = |i: usize| SHAPE_CYCLE[i % SHAPE_CYCLE.len()];
 
     for i in 0..MODIFIED * scale {
         let lang = lang_at(i);
@@ -348,7 +440,7 @@ pub fn generate(scale: usize, seed: u64) -> io::Result<Corpus> {
         let base = gen_file(lang, &mut rng, size_at(i));
         write_lines(&left.join(&path), &base)?;
         let mut edited = base.clone();
-        mutate(&mut edited, lang, &mut rng, MODIFIED_EDIT_PCT);
+        mutate_shaped(&mut edited, lang, &mut rng, MODIFIED_EDIT_PCT, shape_at(i));
         write_lines(&right.join(&path), &edited)?;
     }
 
@@ -370,6 +462,8 @@ pub fn generate(scale: usize, seed: u64) -> io::Result<Corpus> {
         write_lines(&left.join(&old), &base)?;
         let mut edited = base.clone();
         let pct = if i % 2 == 0 { 10 } else { 30 };
+        // Scattered on purpose: it is the adversarial shape for the line-hash
+        // similarity bounds that gate inexact rename detection.
         mutate(&mut edited, lang, &mut rng, pct);
         write_lines(&right.join(&new), &edited)?;
         renames.push((old, new));
