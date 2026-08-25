@@ -250,11 +250,8 @@ impl Highlighter {
         );
 
         let (highlight_state, parse_state) = shared.state();
-        let mut old_hl = HighlightLines::from_state(
-            &self.theme,
-            highlight_state.clone(),
-            parse_state.clone(),
-        );
+        let mut old_hl =
+            HighlightLines::from_state(&self.theme, highlight_state.clone(), parse_state.clone());
         let mut new_hl = HighlightLines::from_state(&self.theme, highlight_state, parse_state);
 
         let mut old_lines = prefix.clone();
@@ -550,10 +547,20 @@ mod tests {
             // Pure append: the whole old side is prefix.
             ("fn a() {}\n", "fn a() {}\nfn b() {}\n", "x.rs", "x.rs"),
             // Edit on line 0: no prefix at all.
-            ("fn a() {}\nfn b() {}\n", "fn z() {}\nfn b() {}\n", "x.rs", "x.rs"),
+            (
+                "fn a() {}\nfn b() {}\n",
+                "fn z() {}\nfn b() {}\n",
+                "x.rs",
+                "x.rs",
+            ),
             // CRLF on both sides, and mixed with LF.
             ("a\r\nb\r\nc\r\n", "a\r\nb\r\nd\r\n", "x.rs", "x.rs"),
-            ("let a = 1;\nlet b = 2;\r\n", "let a = 1;\nlet c = 2;\r\n", "x.rs", "x.rs"),
+            (
+                "let a = 1;\nlet b = 2;\r\n",
+                "let a = 1;\nlet c = 2;\r\n",
+                "x.rs",
+                "x.rs",
+            ),
             // Line endings differ across sides: the prefix must not be shared
             // on lines that only look equal after `\r` stripping.
             ("a\r\nb\r\n", "a\nb\n", "x.rs", "x.rs"),
