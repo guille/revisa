@@ -8,34 +8,35 @@ name = "revisa"
 path = "src/main.rs"
 
 [dependencies]
-clap       = { version = "4", default-features = false, features = [
-  "derive",
-  "error-context",
-  "help",
-  "std",
-  "usage"
-] }
-eframe     = { version = "0.36", default-features = false, features = [
-  "wayland",
-  "wgpu",
-  "x11",
-] }
+clap       = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
+# Sourced from git, not the registry -- see [patch.crates-io] below.
+eframe     = {
+  version          = "0.36",
+  default-features = false,
+  features         = [
+    "wayland",
+    "wgpu",
+    "x11",
+  ]
+}
 fontconfig = { version = "0.11", default-features = false, features = ["dlopen"] }
 rayon      = "1"
 serde      = { version = "1", features = ["derive"] }
 similar    = "3"
-syntect    = { git = "https://github.com/trishume/syntect.git", rev = "4aa78031e93ebd3e0be7278120d0bd9d2508b1a3", default-features = false, features = [
-  "dump-create",
-  "dump-load",
-  "parsing",
-  "plist-load",
-  "regex-fancy",
-  "yaml-load",
-] }
-toml       = { version = "1", default-features = false, features = [
-  "parse",
-  "serde"
-] }
+syntect    = {
+  git              = "https://github.com/trishume/syntect.git",
+  rev              = "4aa78031e93ebd3e0be7278120d0bd9d2508b1a3",
+  default-features = false,
+  features         = [
+    "dump-create",
+    "dump-load",
+    "parsing",
+    "plist-load",
+    "regex-fancy",
+    "yaml-load",
+  ]
+}
+toml       = { version = "1", default-features = false, features = ["parse", "serde"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -65,6 +66,14 @@ unwrap_used      = "warn"
 
 [lints.rust]
 unsafe_code = "deny"
+
+# eframe 0.36.1 busy-loops a whole CPU core waiting for a redraw: it leaves
+# `ControlFlow::Poll` set while winit defers `RedrawRequested` until the Wayland
+# compositor sends a frame callback. Fixed by emilk/egui#8398, which merged four
+# days after 0.36.1 shipped and is not in any release yet.
+# Drop this once a release includes it; cargo will warn the patch is unused.
+[patch.crates-io]
+eframe = { git = "https://github.com/emilk/egui", rev = "7b34fc0e03669946315cc90a73ad7c870e713697" }
 
 [profile.release]
 strip         = true
