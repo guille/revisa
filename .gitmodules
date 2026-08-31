@@ -25,12 +25,12 @@
 [submodule "assets/bundled_syntaxes/02_Extra/Protobuf"]
 	path = assets/bundled_syntaxes/02_Extra/Protobuf
 	url = git@github.com:VcamX/protobuf-syntax-highlighting.git
-[submodule "assets/bundled_syntaxes/02_Extra/Svelte"]
-	path = assets/bundled_syntaxes/02_Extra/Svelte
-	url = git@github.com:guille/sublime-svelte.git
 [submodule "assets/bundled_syntaxes/02_Extra/Terraform"]
 	path = assets/bundled_syntaxes/02_Extra/Terraform
 	url = git@github.com:SublimeText/Terraform.git
 [submodule "assets/bundled_syntaxes/02_Extra/Typst"]
 	path = assets/bundled_syntaxes/02_Extra/Typst
 	url = git@github.com:hyrious/typst-syntax-highlight.git
+[submodule "assets/bundled_syntaxes/02_Extra/Svelte"]
+	path = assets/bundled_syntaxes/02_Extra/Svelte
+	url = git@github.com:corneliusio/svelte-sublime.git
