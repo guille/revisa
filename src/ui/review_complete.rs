@@ -58,6 +58,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) -> bool {
                 if close.clicked() {
                     close_app = true;
                 }
+                move_focus_with_arrows(ui, &go_back, &close);
             });
         });
     });
@@ -69,4 +70,33 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) -> bool {
     state.review_complete.was_open = true;
 
     close_app
+}
+
+/// Cycle focus between the two buttons with the left/right arrows, and swallow
+/// up/down so they leave focus alone. Tab is left to  egui.
+fn move_focus_with_arrows(ui: &egui::Ui, go_back: &egui::Response, close: &egui::Response) {
+    let no_mods = egui::Modifiers::NONE;
+    let (left, right, up, down) = ui.input_mut(|i| {
+        (
+            i.consume_key(no_mods, egui::Key::ArrowLeft),
+            i.consume_key(no_mods, egui::Key::ArrowRight),
+            i.consume_key(no_mods, egui::Key::ArrowUp),
+            i.consume_key(no_mods, egui::Key::ArrowDown),
+        )
+    });
+    if !(left || right || up || down) {
+        return;
+    }
+
+    // egui reads the arrows at the start of the pass, long before we get to consume
+    // them, so the move it scheduled has to be cancelled explicitly.
+    ui.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+
+    if left || right {
+        if go_back.has_focus() {
+            close.request_focus();
+        } else {
+            go_back.request_focus();
+        }
+    }
 }

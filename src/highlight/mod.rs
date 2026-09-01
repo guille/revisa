@@ -210,6 +210,10 @@ impl Highlighter {
     }
 
     /// Highlight an entire file, returning per-line syntax spans.
+    ///
+    /// The rendering path goes through [`Self::highlight_pair`]; this is the
+    /// unshared-state reference it is checked against.
+    #[cfg(any(test, feature = "dev-tools"))]
     pub fn highlight_file(&self, content: &str, filename: &str) -> HighlightedFile {
         self.highlight_with(self.detect_syntax(filename, content), content)
     }

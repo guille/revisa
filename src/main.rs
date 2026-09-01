@@ -632,7 +632,7 @@ impl eframe::App for RevisaApp {
                 });
             });
 
-        if !picker_active && !self.state.help_open {
+        if !picker_active && !self.state.help_open && !self.state.review_complete.show {
             ui::diff_view::show(root_ui, &mut self.state);
         } else {
             ui::diff_view::show_no_input(root_ui, &mut self.state);
