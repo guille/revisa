@@ -51,6 +51,9 @@ pub struct Corpus {
     /// Ground-truth renames as (old, new) relative paths; `None` for
     /// external corpora passed via `--left/--right`.
     pub renames: Option<Vec<(PathBuf, PathBuf)>>,
+    /// Ground-truth edit shape per two-sided pair, keyed by the new-side
+    /// relative path; `None` for external corpora.
+    pub shapes: Option<Vec<(PathBuf, &'static str)>>,
 }
 
 impl Corpus {
@@ -59,6 +62,7 @@ impl Corpus {
             left,
             right,
             renames: None,
+            shapes: None,
         }
     }
 }
@@ -274,6 +278,23 @@ enum EditShape {
     Appended,
     /// Edits confined to the top (imports, headers).
     Header,
+    /// One inserted line near the top that opens a construct the grammar
+    /// keeps open to end of file (block comment, code fence, string). The
+    /// diff is a long equal suffix, but the parse state never re-converges,
+    /// so anything that shares work across equal runs gets nothing here.
+    Divergent,
+}
+
+impl EditShape {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Scattered => "scattered",
+            Self::Clustered => "clustered",
+            Self::Appended => "appended",
+            Self::Header => "header",
+            Self::Divergent => "divergent",
+        }
+    }
 }
 
 const SHAPE_CYCLE: &[EditShape] = &[
@@ -285,7 +306,19 @@ const SHAPE_CYCLE: &[EditShape] = &[
     EditShape::Header,
     EditShape::Clustered,
     EditShape::Appended,
+    EditShape::Divergent,
 ];
+
+/// A line that opens a construct without closing it.
+fn opener(lang: Lang, rng: &mut Rng) -> String {
+    let a = rng.ident();
+    match lang {
+        Lang::Rust | Lang::Go => format!("/* {a}"),
+        Lang::Markdown => "```".to_string(),
+        Lang::Yaml => format!("{a}: \"{}", rng.word()),
+        Lang::Json => format!("  \"{a}\": \"{}", rng.word()),
+    }
+}
 
 /// Apply one contiguous run of edits at `pos` as replace, delete, or insert.
 fn edit_run(lines: &mut Vec<String>, lang: Lang, rng: &mut Rng, pos: usize, run: usize) {
@@ -373,6 +406,12 @@ fn mutate_shaped(lines: &mut Vec<String>, lang: Lang, rng: &mut Rng, pct: usize,
                 edited += run;
             }
         }
+        EditShape::Divergent => {
+            let head = (lines.len() / 10).max(1);
+            // Past line 0 so JSON keeps its opening brace.
+            let pos = (1 + rng.below(head)).min(lines.len());
+            lines.insert(pos, opener(lang, rng));
+        }
     }
 }
 
@@ -429,6 +468,7 @@ pub fn generate(scale: usize, seed: u64) -> io::Result<Corpus> {
     let mut rng = Rng::new(seed);
     let mut namer = Namer { file_no: 0 };
     let mut renames = Vec::new();
+    let mut shapes = Vec::new();
 
     let lang_at = |i: usize| LANG_CYCLE[i % LANG_CYCLE.len()];
     let size_at = |i: usize| SIZES[i % SIZES.len()];
@@ -440,8 +480,10 @@ pub fn generate(scale: usize, seed: u64) -> io::Result<Corpus> {
         let base = gen_file(lang, &mut rng, size_at(i));
         write_lines(&left.join(&path), &base)?;
         let mut edited = base.clone();
-        mutate_shaped(&mut edited, lang, &mut rng, MODIFIED_EDIT_PCT, shape_at(i));
+        let shape = shape_at(i);
+        mutate_shaped(&mut edited, lang, &mut rng, MODIFIED_EDIT_PCT, shape);
         write_lines(&right.join(&path), &edited)?;
+        shapes.push((path, shape.label()));
     }
 
     for i in 0..EXACT_RENAMES * scale {
@@ -451,6 +493,7 @@ pub fn generate(scale: usize, seed: u64) -> io::Result<Corpus> {
         let base = gen_file(lang, &mut rng, size_at(i));
         write_lines(&left.join(&old), &base)?;
         write_lines(&right.join(&new), &base)?;
+        shapes.push((new.clone(), "identical"));
         renames.push((old, new));
     }
 
@@ -466,6 +509,7 @@ pub fn generate(scale: usize, seed: u64) -> io::Result<Corpus> {
         // similarity bounds that gate inexact rename detection.
         mutate(&mut edited, lang, &mut rng, pct);
         write_lines(&right.join(&new), &edited)?;
+        shapes.push((new.clone(), EditShape::Scattered.label()));
         renames.push((old, new));
     }
 
@@ -511,6 +555,7 @@ pub fn generate(scale: usize, seed: u64) -> io::Result<Corpus> {
         let mut edited = base.clone();
         mutate(&mut edited, Lang::Rust, &mut rng, 5);
         write_lines(&right.join(&path), &edited)?;
+        shapes.push((path, EditShape::Scattered.label()));
     }
 
     for _ in 0..MINIFIED * scale {
@@ -520,6 +565,7 @@ pub fn generate(scale: usize, seed: u64) -> io::Result<Corpus> {
         // Change the tail so the pair diffs as one modified (huge) line pair.
         let edited = vec![format!("{}var {}=1;", base[0], rng.ident())];
         write_lines(&right.join(&path), &edited)?;
+        shapes.push((path, "minified"));
     }
 
     let manifest: Vec<String> = renames
@@ -532,5 +578,6 @@ pub fn generate(scale: usize, seed: u64) -> io::Result<Corpus> {
         left,
         right,
         renames: Some(renames),
+        shapes: Some(shapes),
     })
 }

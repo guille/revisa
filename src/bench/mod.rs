@@ -17,7 +17,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use crate::app::{self, FileDiffData, LineIndex};
-use crate::domain::diff::LineDiff;
+use crate::domain::diff::{DiffOp, LineDiff, leading_equal_lines};
 use crate::domain::file_pair::{self, FileChangeKind, FilePair};
 use crate::domain::fold::FoldState;
 use crate::domain::search::{self, SearchableFileData};
@@ -43,6 +43,69 @@ struct StageResult {
     name: String,
     wall_ms: f64,
     counters: Vec<(&'static str, f64)>,
+}
+
+/// One pair's contents and line diff, read once and reused by later stages.
+struct ReadPair {
+    old: LineIndex,
+    new: LineIndex,
+    binary: bool,
+    diff: LineDiff,
+}
+
+/// How much of a pair's highlighting work is shareable between its sides.
+///
+/// A line's spans depend on the parse state left by the previous line, so
+/// two sides can share a parse only while their text *and* state agree.
+/// `parsed` is what the current prefix-only sharing feeds syntect;
+/// `floor` is what it would feed if every equal run were parsed once, i.e.
+/// assuming the states re-converge the moment the text does. Real
+/// re-convergence lands somewhere between the two, and `equal_runs` counts
+/// the join points a re-sync would have to pay for.
+#[derive(Default, Clone, Copy)]
+struct ShareStats {
+    lines: usize,
+    parsed: usize,
+    floor: usize,
+    equal_runs: usize,
+}
+
+impl ShareStats {
+    fn of(old_lines: usize, new_lines: usize, ops: &[DiffOp]) -> Self {
+        let prefix = leading_equal_lines(ops);
+        let (mut equal, mut runs) = (0, 0);
+        for op in ops {
+            if let DiffOp::Equal { old_range, .. } = op {
+                equal += old_range.len();
+                runs += 1;
+            }
+        }
+        let lines = old_lines + new_lines;
+        Self {
+            lines,
+            parsed: lines - prefix,
+            floor: lines - equal,
+            equal_runs: runs - usize::from(prefix > 0),
+        }
+    }
+
+    fn add(&mut self, o: Self) {
+        self.lines += o.lines;
+        self.parsed += o.parsed;
+        self.floor += o.floor;
+        self.equal_runs += o.equal_runs;
+    }
+
+    fn counters(self, wall_ms: f64) -> Vec<(&'static str, f64)> {
+        vec![
+            ("lines", self.lines as f64),
+            ("lines_per_s", rate(self.lines, wall_ms)),
+            ("parsed_lines", self.parsed as f64),
+            ("floor_lines", self.floor as f64),
+            ("rejoin_lines", (self.parsed - self.floor) as f64),
+            ("equal_runs", self.equal_runs as f64),
+        ]
+    }
 }
 
 /// Run `f` `iterations` times; return the last result and the median wall ms.
@@ -81,9 +144,16 @@ pub fn run(opts: &Options) {
 
     let want = |s: &str| opts.filter.as_deref().is_none_or(|f| s.contains(f));
     let iters = |s: &str| if want(s) { opts.iterations } else { 1 };
-    let want_read = ["read-diff", "highlight", "compose", "search", "fold"]
-        .iter()
-        .any(|s| want(s));
+    let want_read = [
+        "read-diff",
+        "highlight",
+        "highlight-pair",
+        "compose",
+        "search",
+        "fold",
+    ]
+    .iter()
+    .any(|s| want(s));
     let want_compose = ["compose", "search", "fold"].iter().any(|s| want(s));
 
     let settings = Settings::default();
@@ -117,14 +187,14 @@ pub fn run(opts: &Options) {
 
     // read-diff: read contents + Myers line diff, sequential (phase-1 cost
     // per file; the app runs this on rayon, sequential is stabler to compare).
-    let mut read_data: Vec<(LineIndex, LineIndex, bool)> = Vec::new();
+    let mut read_data: Vec<ReadPair> = Vec::new();
     if want_read {
         let (data, wall) = timed(iters("read-diff"), || {
             let mut lines = 0usize;
             let mut added = 0usize;
             let mut deleted = 0usize;
             let mut prefix = 0usize;
-            let data: Vec<(LineIndex, LineIndex, bool)> = pairs
+            let data: Vec<ReadPair> = pairs
                 .iter()
                 .map(|p| {
                     // Unlimited: this stage measures raw read+diff throughput.
@@ -133,8 +203,13 @@ pub fn run(opts: &Options) {
                     lines += read.old_lines.len() + read.new_lines.len();
                     added += read.stat.map_or(0, |s| s.added);
                     deleted += read.stat.map_or(0, |s| s.deleted);
-                    prefix += crate::domain::diff::leading_equal_lines(&read.diff.ops);
-                    (read.old_lines, read.new_lines, read.binary)
+                    prefix += leading_equal_lines(&read.diff.ops);
+                    ReadPair {
+                        old: read.old_lines,
+                        new: read.new_lines,
+                        binary: read.binary,
+                        diff: read.diff,
+                    }
                 })
                 .collect();
             (data, lines, added, deleted, prefix)
@@ -201,10 +276,10 @@ pub fn run(opts: &Options) {
         let inputs: Vec<(&str, String)> = pairs
             .iter()
             .zip(&read_data)
-            .filter(|(_, (_, _, is_binary))| !is_binary)
-            .flat_map(|(p, (old, new, _))| {
+            .filter(|(_, r)| !r.binary)
+            .flat_map(|(p, r)| {
                 let name = p.relative_path.to_string_lossy().into_owned();
-                [(old.content(), name.clone()), (new.content(), name)]
+                [(r.old.content(), name.clone()), (r.new.content(), name)]
             })
             .filter(|(content, _)| !content.is_empty())
             .collect();
@@ -249,6 +324,72 @@ pub fn run(opts: &Options) {
         }
     }
 
+    // highlight-pair: the app's highlight path — both sides of every pair,
+    // parsing the common leading run once. Compare its wall against
+    // `highlight` (sides parsed independently) for what prefix sharing buys
+    // today; the `ShareStats` counters bound what re-joining after every
+    // equal run could still add. Broken out per edit shape, since that is
+    // what decides whether the streams ever re-converge.
+    if want("highlight-pair") {
+        let inputs: Vec<(&FilePair, &ReadPair, String, String, &'static str)> = pairs
+            .iter()
+            .zip(&read_data)
+            .filter(|(_, r)| !r.binary)
+            .map(|(p, r)| {
+                let (name, old_name) = pair_names(p);
+                (
+                    p,
+                    r,
+                    name,
+                    old_name,
+                    shape_bucket(p, corpus.shapes.as_deref()),
+                )
+            })
+            .collect();
+        let mut per_shape: Vec<(&'static str, f64, ShareStats)> = Vec::new();
+        let ((), wall) = timed(iters("highlight-pair"), || {
+            per_shape.clear();
+            for (_, r, name, old_name, shape) in &inputs {
+                let start = Instant::now();
+                black_box(highlighter.highlight_pair(
+                    r.old.content(),
+                    r.new.content(),
+                    old_name,
+                    name,
+                    leading_equal_lines(&r.diff.ops),
+                ));
+                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                let stats = ShareStats::of(r.old.len(), r.new.len(), &r.diff.ops);
+                match per_shape.iter_mut().find(|(s, _, _)| s == shape) {
+                    Some(slot) => {
+                        slot.1 += ms;
+                        slot.2.add(stats);
+                    }
+                    None => per_shape.push((shape, ms, stats)),
+                }
+            }
+        });
+        let mut total = ShareStats::default();
+        for (_, _, stats) in &per_shape {
+            total.add(*stats);
+        }
+        let mut counters = vec![("pairs", inputs.len() as f64)];
+        counters.extend(total.counters(wall));
+        results.push(StageResult {
+            name: "highlight-pair".to_string(),
+            wall_ms: wall,
+            counters,
+        });
+        per_shape.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for (shape, ms, stats) in per_shape {
+            results.push(StageResult {
+                name: format!("highlight-pair[{shape}]"),
+                wall_ms: ms,
+                counters: stats.counters(ms),
+            });
+        }
+    }
+
     // compose: full FileDiffData construction (diff + highlight + inline +
     // styled spans) — the cost of opening one file, applied to every pair.
     let mut datas: Vec<FileDiffData> = Vec::new();
@@ -259,13 +400,9 @@ pub fn run(opts: &Options) {
             let inputs: Vec<(LineIndex, LineIndex, String, String, bool)> = pairs
                 .iter()
                 .zip(&read_data)
-                .map(|(p, (old, new, is_binary))| {
-                    let name = p.relative_path.to_string_lossy().into_owned();
-                    let old_name = p
-                        .old_relative_path
-                        .as_ref()
-                        .map_or_else(|| name.clone(), |op| op.to_string_lossy().into_owned());
-                    (old.clone(), new.clone(), name, old_name, *is_binary)
+                .map(|(p, r)| {
+                    let (name, old_name) = pair_names(p);
+                    (r.old.clone(), r.new.clone(), name, old_name, r.binary)
                 })
                 .collect();
             let b = &settings.behavior;
@@ -337,7 +474,7 @@ pub fn run(opts: &Options) {
         if want("search-snapshot") {
             let bytes: usize = read_data
                 .iter()
-                .map(|(o, n, _)| o.content().len() + n.content().len())
+                .map(|r| r.old.content().len() + r.new.content().len())
                 .sum();
             results.push(StageResult {
                 name: "search-snapshot".to_string(),
@@ -481,6 +618,27 @@ fn walk_result(
 
 fn count_lines(s: &str) -> usize {
     s.lines().count()
+}
+
+/// (new, old) relative paths as strings; old falls back to new when unrenamed.
+fn pair_names(p: &FilePair) -> (String, String) {
+    let name = p.relative_path.to_string_lossy().into_owned();
+    let old_name = p
+        .old_relative_path
+        .as_ref()
+        .map_or_else(|| name.clone(), |op| op.to_string_lossy().into_owned());
+    (name, old_name)
+}
+
+/// Bucket for the per-shape `highlight-pair` breakdown: the generator's
+/// ground-truth edit shape when available, otherwise sidedness.
+fn shape_bucket(p: &FilePair, shapes: Option<&[(PathBuf, &'static str)]>) -> &'static str {
+    if matches!(p.kind, FileChangeKind::Added | FileChangeKind::Deleted) {
+        return "one-sided";
+    }
+    shapes
+        .and_then(|s| s.iter().find(|(path, _)| *path == p.relative_path))
+        .map_or("two-sided", |(_, label)| label)
 }
 
 /// Items per second from a count and a wall time in ms.
