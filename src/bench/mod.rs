@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use crate::app::{self, FileDiffData};
+use crate::app::{self, FileDiffData, LineIndex};
 use crate::domain::diff::LineDiff;
 use crate::domain::file_pair::{self, FileChangeKind, FilePair};
 use crate::domain::fold::FoldState;
@@ -117,24 +117,24 @@ pub fn run(opts: &Options) {
 
     // read-diff: read contents + Myers line diff, sequential (phase-1 cost
     // per file; the app runs this on rayon, sequential is stabler to compare).
-    let mut read_data: Vec<(String, String, bool)> = Vec::new();
+    let mut read_data: Vec<(LineIndex, LineIndex, bool)> = Vec::new();
     if want_read {
         let (data, wall) = timed(iters("read-diff"), || {
             let mut lines = 0usize;
             let mut added = 0usize;
             let mut deleted = 0usize;
             let mut prefix = 0usize;
-            let data: Vec<(String, String, bool)> = pairs
+            let data: Vec<(LineIndex, LineIndex, bool)> = pairs
                 .iter()
                 .map(|p| {
                     // Unlimited: this stage measures raw read+diff throughput.
                     let read = app::read_and_diff(p, 0);
                     black_box(&read.diff);
-                    lines += read.old_line_count + read.new_line_count;
+                    lines += read.old_lines.len() + read.new_lines.len();
                     added += read.stat.map_or(0, |s| s.added);
                     deleted += read.stat.map_or(0, |s| s.deleted);
                     prefix += crate::domain::diff::leading_equal_lines(&read.diff.ops);
-                    (read.old_content, read.new_content, read.binary)
+                    (read.old_lines, read.new_lines, read.binary)
                 })
                 .collect();
             (data, lines, added, deleted, prefix)
@@ -170,7 +170,7 @@ pub fn run(opts: &Options) {
                 .collect();
             let lines: usize = phase1
                 .iter()
-                .map(|p| p.old_line_count + p.new_line_count)
+                .map(|p| p.old_lines.len() + p.new_lines.len())
                 .sum();
             black_box(&phase1);
             lines
@@ -204,7 +204,7 @@ pub fn run(opts: &Options) {
             .filter(|(_, (_, _, is_binary))| !is_binary)
             .flat_map(|(p, (old, new, _))| {
                 let name = p.relative_path.to_string_lossy().into_owned();
-                [(old.as_str(), name.clone()), (new.as_str(), name)]
+                [(old.content(), name.clone()), (new.content(), name)]
             })
             .filter(|(content, _)| !content.is_empty())
             .collect();
@@ -255,8 +255,8 @@ pub fn run(opts: &Options) {
     if want_compose {
         let mut walls = Vec::new();
         for _ in 0..iters("compose") {
-            // Clone inputs outside the timed region; compose consumes Strings.
-            let inputs: Vec<(String, String, String, String, bool)> = pairs
+            // Clone inputs outside the timed region; compose consumes the indexes.
+            let inputs: Vec<(LineIndex, LineIndex, String, String, bool)> = pairs
                 .iter()
                 .zip(&read_data)
                 .map(|(p, (old, new, is_binary))| {
@@ -335,7 +335,10 @@ pub fn run(opts: &Options) {
                 .collect::<Vec<_>>()
         });
         if want("search-snapshot") {
-            let bytes: usize = read_data.iter().map(|(o, n, _)| o.len() + n.len()).sum();
+            let bytes: usize = read_data
+                .iter()
+                .map(|(o, n, _)| o.content().len() + n.content().len())
+                .sum();
             results.push(StageResult {
                 name: "search-snapshot".to_string(),
                 wall_ms: wall,

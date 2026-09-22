@@ -505,8 +505,8 @@ impl AppState {
                     .as_ref()
                     .map_or_else(|| filename.clone(), |p| p.to_string_lossy());
                 compute_diff_from_contents_with_diff(
-                    first.old_content,
-                    first.new_content,
+                    first.old_lines,
+                    first.new_lines,
                     Some(first.diff),
                     &filename,
                     &old_filename,
@@ -522,7 +522,7 @@ impl AppState {
         // Pre-filter: create placeholders for large and binary files so the bg thread skips them.
         for (i, entry) in cached_contents.iter_mut().enumerate().skip(1) {
             if let Some(p) = entry.as_ref() {
-                let (old_lines, new_lines) = (p.old_line_count, p.new_line_count);
+                let (old_lines, new_lines) = (p.old_lines.len(), p.new_lines.len());
                 if p.binary {
                     diff_cache.insert(
                         i,
@@ -568,8 +568,8 @@ impl AppState {
                             .as_ref()
                             .map_or_else(|| filename.clone(), |p| p.to_string_lossy());
                         let data = compute_diff_from_contents_with_diff(
-                            cached.old_content,
-                            cached.new_content,
+                            cached.old_lines,
+                            cached.new_lines,
                             Some(cached.diff),
                             &filename,
                             &old_filename,
@@ -636,8 +636,8 @@ impl AppState {
                     .as_ref()
                     .map_or_else(|| filename.clone(), |p| p.to_string_lossy());
                 compute_diff_from_contents_with_diff(
-                    read.old_content,
-                    read.new_content,
+                    read.old_lines,
+                    read.new_lines,
                     Some(read.diff),
                     &filename,
                     &old_filename,
@@ -810,8 +810,8 @@ impl AppState {
                     .as_ref()
                     .map_or_else(|| filename.clone(), |p| p.to_string_lossy());
                 compute_diff_from_contents_with_diff(
-                    read.old_content,
-                    read.new_content,
+                    read.old_lines,
+                    read.new_lines,
                     Some(read.diff),
                     &filename,
                     &old_filename,
@@ -1166,16 +1166,14 @@ pub struct PairDiff {
     /// `None` when the diff was skipped (line count over `max_lines`);
     /// `diff` is empty in that case.
     pub stat: Option<DiffStat>,
-    pub old_content: String,
-    pub new_content: String,
+    /// Indexed here, on the worker that already holds the content, so the
+    /// `max_diff_lines` guard reads `len()` instead of rescanning every file
+    /// serially on the UI thread.
+    pub old_lines: LineIndex,
+    pub new_lines: LineIndex,
     pub diff: LineDiff,
     /// Either side was non-UTF-8 or contained null bytes.
     pub binary: bool,
-    /// Line counts for the `max_diff_lines` guard. Counted here, on the worker
-    /// that already holds the content, so the guard doesn't rescan every file
-    /// serially on the UI thread.
-    pub old_line_count: usize,
-    pub new_line_count: usize,
 }
 
 /// Read both sides of a pair and compute their line diff and stats.
@@ -1189,28 +1187,23 @@ pub fn read_and_diff(pair: &FilePair, max_lines: usize) -> PairDiff {
     // If either side is binary, flag the whole pair as binary.
     let binary = matches!(old_result, Some(None)) || matches!(new_result, Some(None));
 
-    let old_content = old_result.flatten().unwrap_or_default();
-    let new_content = new_result.flatten().unwrap_or_default();
+    let old_lines = LineIndex::new(old_result.flatten().unwrap_or_default());
+    let new_lines = LineIndex::new(new_result.flatten().unwrap_or_default());
 
-    let old_line_count = old_content.lines().count();
-    let new_line_count = new_content.lines().count();
-
-    let over_limit = max_lines > 0 && (old_line_count > max_lines || new_line_count > max_lines);
+    let over_limit = max_lines > 0 && (old_lines.len() > max_lines || new_lines.len() > max_lines);
     let (diff, stat) = if over_limit {
         (LineDiff::default(), None)
     } else {
-        let diff = diff_lines(&old_content, &new_content);
+        let diff = diff_lines(old_lines.content(), new_lines.content());
         let stat = diff_stat(&diff.ops);
         (diff, Some(stat))
     };
     PairDiff {
         stat,
-        old_content,
-        new_content,
+        old_lines,
+        new_lines,
         diff,
         binary,
-        old_line_count,
-        new_line_count,
     }
 }
 
@@ -1218,8 +1211,8 @@ pub fn read_and_diff(pair: &FilePair, max_lines: usize) -> PairDiff {
 /// instead of running `diff_lines` again.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_diff_from_contents_with_diff(
-    old_content: String,
-    new_content: String,
+    old_lines: LineIndex,
+    new_lines: LineIndex,
     pre_diff: Option<LineDiff>,
     filename: &str,
     old_filename: &str,
@@ -1238,11 +1231,6 @@ pub fn compute_diff_from_contents_with_diff(
     let fold_exp = settings.behavior.fold_expand_step;
     let fold_rh = settings.behavior.fold_row_height;
     let max_lines = settings.behavior.max_diff_lines;
-
-    // Index both sides up front: this is the one place that decides where a
-    // line starts and ends, and it is the same index `FileDiffData` keeps.
-    let old_lines = LineIndex::new(old_content);
-    let new_lines = LineIndex::new(new_content);
 
     // Size guard: skip expensive computation for very large files.
     if !skip_size_guard
