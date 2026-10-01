@@ -589,7 +589,7 @@ mod tests {
         let (left, right) =
             setup_dirs(&[("foo.rs", "fn main() {}")], &[("foo.rs", "fn main() {}")]);
         let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
-        assert!(pairs.is_empty());
+        assert_eq!(pairs, []);
     }
 
     #[test]
@@ -693,7 +693,7 @@ mod tests {
         let left = tempfile::tempdir().unwrap();
         let right = tempfile::tempdir().unwrap();
         let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
-        assert!(pairs.is_empty());
+        assert_eq!(pairs, []);
     }
 
     #[test]
@@ -706,7 +706,7 @@ mod tests {
 
         let pairs = walk_and_pair(left.path(), right.path(), true, RenameLimit::Fixed(0)).unwrap();
         // Both sides have identical content (symlink resolved), so should be empty
-        assert!(pairs.is_empty());
+        assert_eq!(pairs, []);
     }
 
     #[test]

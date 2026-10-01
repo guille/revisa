@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn test_compose_empty_line() {
         let result = compose_line(&[], DiffBg::None, 0, [200, 200, 200, 255], test_colors());
-        assert!(result.is_empty());
+        assert_eq!(result, []);
     }
 
     #[test]
@@ -660,7 +660,7 @@ mod tests {
         let result = h.highlight_file(content, "test.rs");
         assert_eq!(result.lines.len(), 3);
         // Each line should have at least one span.
-        assert!(!result.lines[0].is_empty());
+        assert_ne!(result.lines[0], []);
     }
 
     #[test]
@@ -670,11 +670,11 @@ mod tests {
         let content = format!("fn main() {{}}\n{long}\nfn other() {{}}\n");
         let result = h.highlight_file(&content, "test.rs");
         assert_eq!(result.lines.len(), 3);
-        assert!(!result.lines[0].is_empty());
+        assert_ne!(result.lines[0], []);
         // Long line renders plain (empty spans → default fg in compose_line).
-        assert!(result.lines[1].is_empty());
+        assert_eq!(result.lines[1], []);
         // Following lines are still highlighted.
-        assert!(!result.lines[2].is_empty());
+        assert_ne!(result.lines[2], []);
     }
 
     #[test]
@@ -779,11 +779,11 @@ mod tests {
         assert_eq!(r0[1].range(), 4..9);
         assert!(styles[usize::from(r0[1].style)].bold);
 
-        assert!(rows.row(1).is_empty());
+        assert_eq!(rows.row(1), []);
         assert_eq!(rows.row(2)[0].style, r0[0].style);
         // Out of range (incl. default-constructed placeholders) → empty.
-        assert!(rows.row(3).is_empty());
-        assert!(StyledRows::default().row(0).is_empty());
+        assert_eq!(rows.row(3), []);
+        assert_eq!(StyledRows::default().row(0), []);
     }
 
     #[test]

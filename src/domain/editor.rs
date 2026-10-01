@@ -147,8 +147,8 @@ mod tests {
 
     #[test]
     fn shell_words_empty() {
-        assert!(split_shell_words("").is_empty());
-        assert!(split_shell_words("   ").is_empty());
+        assert_eq!(split_shell_words(""), [] as [String; 0]);
+        assert_eq!(split_shell_words("   "), [] as [String; 0]);
     }
 
     #[test]
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn empty_command_yields_no_argv() {
-        assert!(argv("", 42).is_empty());
+        assert_eq!(argv("", 42), [] as [String; 0]);
     }
 
     // ── templates ────────────────────────────────────────────────────

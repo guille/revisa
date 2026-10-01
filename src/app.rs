@@ -1880,7 +1880,7 @@ mod tests {
         let mut s = make_state(&["src/a.rs", "src/b.rs"]);
         // Excluding "src" would hide everything — should be rejected.
         assert!(!s.exclude_dir(Path::new("src")));
-        assert!(s.excluded_dirs.is_empty());
+        assert_eq!(s.excluded_dirs, [] as [std::path::PathBuf; 0]);
     }
 
     #[test]

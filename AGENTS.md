@@ -1,59 +1,5 @@
 **revisa** is a directory diff review tool, mostly meant to be used as a git difftool. It targets Linux only and runs as a native GUI app using egui/eframe.
 
-## Current State
-
-All core features are implemented and working:
-
-- **Side-by-side diff view** with scroll-synced old/new panels, syntax highlighting, and inline word-level diff highlighting
-- **Unified (stacked) diff view** toggled with Ctrl+M, with dual gutter (old/new line numbers)
-- **Sidebar** with file tree view, change kind badges, reviewed checkboxes, and progress bar
-- **Quick picker** (Ctrl+P) with fuzzy search for fast file switching
-- **Folding** of unchanged regions with clickable expand-up/expand-down bars
-- **Rename detection** with heuristic content similarity scoring (parallel via rayon)
-- **Syntax highlighting** via syntect with embedded bundled syntaxes and custom .tmTheme support
-- **Configurable settings** via TOML (`~/.config/revisa/config.toml`) — see SETTINGS.md
-- **All keybinds** configurable; help overlay shows current bindings
-- **Exclude directory** feature (right-click context menu in sidebar)
-- **Open in editor** feature (configurable editor command or $VISUAL/$EDITOR)
-- **Copy path** to clipboard (Ctrl+Y or click icon in header)
-- **Search** across all files in the diff
-- **Bold/italic font support** via fontconfig
-- **All tests passing**, 0 warnings
-
-## Architecture
-
-```
-src/
-├── main.rs                — CLI (clap subcommands: diff, build-cache), app setup, status bar
-├── app.rs                 — AppState, FileDiffData, FontVariants, diff computation
-├── domain/
-│   ├── mod.rs
-│   ├── diff.rs            — Diff computation
-│   ├── editor.rs          — "Open in editor" argv building (placeholders + per-editor line syntax)
-│   ├── file_pair.rs       — File pairing, walk_and_pair, rename detection
-│   ├── file_tree.rs       — Manage the file tree
-│   ├── fold.rs            — FoldState, DiffMode, UnifiedSubRow, unified offset mapping
-│   ├── hunk.rs            — AlignedRow alignment, hunk navigation
-│   ├── review_state.rs    — Reviewed file tracking
-│   ├── search.rs          — Search in files functionality
-│   └── settings.rs        — TOML settings parsing, validation, keybind system
-├── highlight/
-│   ├── mod.rs             — StyledSpan, compose_line, Highlighter
-│   └── cache.rs           — Syntax cache (bundled + user custom)
-└── ui/
-    ├── mod.rs
-    ├── common.rs           — Shared constants, icon helpers, collapse_path
-    ├── diff_view/
-    │   ├── mod.rs          — DiffViewCtx, show/show_inner, rendering (SBS + unified)
-    │   ├── input.rs        — Keyboard/scroll input handling, momentum scrolling
-    │   └── header.rs       — Unified file header bar with copy button
-    ├── file_list.rs        — Sidebar mode: file tree with context menu
-    ├── help_overlay.rs     — F1 help overlay
-    ├── review_complete.rs  — Modal that pops when the user has reviewed all files
-    ├── search_panel.rs     — Sidebar mode: search across all files
-    └── quick_picker.rs     — Ctrl+P fuzzy file picker
-```
-
 ## Core Tenets
 
 - Separation of UI vs domain concerns
@@ -88,21 +34,5 @@ This project uses **mise**. Prefer `mise run build` / `mise run test` over direc
 - Unified offsets are cleared on fold mutations and recomputed lazily
 
 ### Settings
-- TOML config at `$XDG_CONFIG_HOME/revisa/config.toml` (default `~/.config/revisa/config.toml`)
-- All colors are `#RRGGBB` or `#RRGGBBAA` hex strings; keybinds are `"key"` or `"ctrl+key"` format
 - See `SETTINGS.md` for full reference
 
-### Performance
-- Background parallel diff via rayon (file 0 computed eagerly, rest in background)
-- Files >4k lines (configurable threshold) get a placeholder message instead of rendering
-- Glyph calibration done once; fold labels cached; sidebar defaults cached
-- Layout warmup until PPI stable (`PPI_STABLE_THRESHOLD`) to let egui panel layout stabilize
-
-### CLI
-- `revisa diff --left /path/left --right /path/right [--config /path/config.toml]`
-- `revisa build-cache` — prebuild syntax cache for faster startup
-- `revisa bench` (dev-tools feature) — domain-layer benchmark suite over a generated corpus; see BENCH.md
-
-## Out of Scope
-- Accessibility
-- Line wrapping (horizontal scroll instead)

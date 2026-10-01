@@ -675,7 +675,7 @@ mod tests {
         );
 
         let matches = compute_file_matches(0, &SearchableFileData::from_diff_data(&data), "");
-        assert!(matches.is_empty());
+        assert_eq!(matches, []);
     }
 
     #[test]
@@ -691,7 +691,7 @@ mod tests {
         );
 
         let matches = compute_file_matches(0, &SearchableFileData::from_diff_data(&data), "xyz");
-        assert!(matches.is_empty());
+        assert_eq!(matches, []);
     }
 
     #[test]
@@ -745,7 +745,7 @@ mod tests {
         data.too_large_message = Some("Too large".into());
 
         let matches = compute_file_matches(0, &SearchableFileData::from_diff_data(&data), "hello");
-        assert!(matches.is_empty());
+        assert_eq!(matches, []);
     }
 
     #[test]

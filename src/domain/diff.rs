@@ -371,8 +371,8 @@ mod tests {
     fn test_inline_diff_completely_different() {
         // Lines with no similarity should return empty spans (min_ratio guard).
         let (old_spans, new_spans) = diff_inline("aaa", "zzz");
-        assert!(old_spans.is_empty());
-        assert!(new_spans.is_empty());
+        assert_eq!(old_spans, []);
+        assert_eq!(new_spans, []);
     }
 
     #[test]
@@ -381,8 +381,8 @@ mod tests {
         let old = "x=1;".repeat(300);
         let new = format!("{old}y=2;");
         let (old_spans, new_spans) = diff_inline(&old, &new);
-        assert!(old_spans.is_empty());
-        assert!(new_spans.is_empty());
+        assert_eq!(old_spans, []);
+        assert_eq!(new_spans, []);
     }
 
     #[test]
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn test_empty_vs_empty() {
         let diff = diff_lines("", "");
-        assert!(diff.ops.is_empty());
+        assert_eq!(diff.ops, []);
     }
 
     #[test]
