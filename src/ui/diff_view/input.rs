@@ -129,7 +129,7 @@ pub(super) fn handle_input(ctx: &egui::Context, state: &mut AppState, total_rows
             {
                 // Ctrl+F: toggle search sidebar.
                 if kb.find.matches_strict(*key, *modifiers) {
-                    state.search.open = !state.search.open;
+                    state.search.open.toggle();
                     if state.search.open {
                         state.search.needs_focus = true;
                         // Remember if the sidebar was hidden so we can restore on close.

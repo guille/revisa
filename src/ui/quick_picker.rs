@@ -51,7 +51,7 @@ impl QuickPicker {
     }
 
     pub fn toggle(&mut self, current_file: usize, scroll_y: f32, scroll_x: f32) -> Option<usize> {
-        self.open = !self.open;
+        self.open.toggle();
         if self.open {
             self.query.clear();
             self.selected_idx = 0;
@@ -360,10 +360,8 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, picker: &mut QuickPicker)
 
                                 // Split into filename and parent directory.
                                 let path = std::path::Path::new(name);
-                                let filename = path
-                                    .file_name()
-                                    .map(|f| f.to_string_lossy())
-                                    .unwrap_or_default();
+                                let filename =
+                                    path.file_name().map_or_default(|f| f.to_string_lossy());
                                 let parent = path
                                     .parent()
                                     .filter(|p| *p != std::path::Path::new(""))

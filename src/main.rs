@@ -542,7 +542,7 @@ impl eframe::App for RevisaApp {
 
         // Help overlay takes priority over everything.
         if toggle_help && !self.picker.is_open() {
-            self.state.help_open = !self.state.help_open;
+            self.state.help_open.toggle();
         }
         if self.state.help_open {
             // Skip overlay input on the frame it was just opened, so the same
@@ -579,7 +579,7 @@ impl eframe::App for RevisaApp {
                 );
             }
             if toggle_sidebar && !self.picker.is_open() {
-                self.state.sidebar_visible = !self.state.sidebar_visible;
+                self.state.sidebar_visible.toggle();
             }
             // Deferred picker open from header icon click.
             if self.state.pending_open_picker && !self.picker.is_open() {

@@ -210,7 +210,7 @@ pub fn toggle_dir(roots: &mut [TreeNode], path: &[usize]) {
         }
     }
     if let Some(TreeNode::Dir { expanded, .. }) = nodes.get_mut(path[path.len() - 1]) {
-        *expanded = !*expanded;
+        expanded.toggle();
     }
 }
 

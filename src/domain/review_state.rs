@@ -23,7 +23,7 @@ impl ReviewState {
     /// Toggle the reviewed state of a file. Returns the new state.
     pub fn toggle(&mut self, path: &Path) -> bool {
         if let Some(val) = self.reviewed.get_mut(path) {
-            *val = !*val;
+            val.toggle();
             *val
         } else {
             false

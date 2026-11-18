@@ -512,7 +512,7 @@ fn render_header_and_dispatch(
         state.pending_open_picker = true;
     }
     if header_actions.search_clicked {
-        state.search.open = !state.search.open;
+        state.search.open.toggle();
         if state.search.open {
             state.search.needs_focus = true;
             state.search.sidebar_was_hidden = !state.sidebar_visible;

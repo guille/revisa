@@ -95,10 +95,10 @@ fn split_shell_words(s: &str) -> Vec<String> {
     for ch in s.chars() {
         match ch {
             '\'' if !in_double => {
-                in_single = !in_single;
+                in_single.toggle();
             }
             '"' if !in_single => {
-                in_double = !in_double;
+                in_double.toggle();
             }
             c if c.is_whitespace() && !in_single && !in_double => {
                 if !current.is_empty() {

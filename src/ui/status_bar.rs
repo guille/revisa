@@ -37,7 +37,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, font_size: f32) {
             .size(font_size),
     );
     if btn.clicked() {
-        state.sidebar_visible = !state.sidebar_visible;
+        state.sidebar_visible.toggle();
     }
     let toggle_kb = &state.settings.keybinds.toggle_sidebar;
     btn.on_hover_ui(|ui| {
@@ -145,7 +145,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, font_size: f32) {
                 .size((font_size * 1.4).round()),
         );
         if help_btn.clicked() {
-            state.help_open = !state.help_open;
+            state.help_open.toggle();
         }
         help_btn.on_hover_text("Toggle help (?)");
 
